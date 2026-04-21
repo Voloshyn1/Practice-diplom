@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QMessageBox,
     QProgressBar,
+    QDialog,
+    QFileDialog,
 )
 
 from analyzer import compare_scans, get_previous_scan_data
@@ -23,6 +25,13 @@ from report import build_scan_summary
 from risk import calculate_host_scores, calculate_scan_attention_total, derive_attention_level
 from scanner import scan_network
 from storage import (
+    export_latest_events_csv,
+    export_latest_scores_csv,
+    export_latest_summary_txt,
+    get_device_passport,
+    get_device_scan_history,
+    get_scan_details,
+    get_scan_history,
     init_db,
     load_device_scores_for_scan,
     load_events_for_scan,
@@ -33,6 +42,168 @@ from storage import (
     save_scan,
     save_scan_summary,
 )
+
+
+class DevicePassportDialog(QDialog):
+    def __init__(self, ip: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Паспорт пристрою: {ip}")
+        self.resize(820, 520)
+
+        layout = QVBoxLayout(self)
+
+        passport = get_device_passport(ip)
+        if not passport:
+            layout.addWidget(QLabel(f"Дані по хосту {ip} не знайдено."))
+            return
+
+        latest_score = passport.get("latest_score", {})
+        reasons = latest_score.get("reasons", "")
+
+        summary = QLabel(
+            f"IP: {passport.get('ip', '')}\n"
+            f"Hostname: {passport.get('hostname') or '—'}\n"
+            f"First seen: {passport.get('first_seen') or '—'}\n"
+            f"Last seen: {passport.get('last_seen') or '—'}\n"
+            f"Поточна роль: {passport.get('current_role') or '—'}\n"
+            f"Поточні порти: {passport.get('current_open_ports') or '—'}\n"
+            f"Кількість появ у сканах: {passport.get('appearances', 0)}\n"
+            f"Остання оцінка уваги: {latest_score.get('attention_score', 0)} "
+            f"({latest_score.get('attention_level', 'Low')})\n"
+            f"Причини: {reasons or '—'}\n"
+            f"\nІсторичний підсумок: {passport.get('historical_summary', '')}"
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        layout.addWidget(QLabel("Останні події по хосту:"))
+        events_table = QTableWidget()
+        events_table.setColumnCount(4)
+        events_table.setHorizontalHeaderLabels(["Час", "Тип", "Опис", "Scan ID"])
+        events = passport.get("recent_events", [])
+        events_table.setRowCount(len(events))
+        for row, event in enumerate(events):
+            for col, value in enumerate([
+                event.get("created_at", ""),
+                event.get("event_type", ""),
+                event.get("description", ""),
+                str(event.get("scan_id", "")),
+            ]):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                events_table.setItem(row, col, item)
+        events_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(events_table)
+
+        layout.addWidget(QLabel("Історія появ у скануваннях:"))
+        history_table = QTableWidget()
+        history_table.setColumnCount(6)
+        history_table.setHorizontalHeaderLabels(
+            ["Scan ID", "Finished", "Role", "Ports", "Total attention", "Network"]
+        )
+        history = get_device_scan_history(ip)
+        history_table.setRowCount(len(history))
+        for row, h in enumerate(history):
+            values = [
+                str(h.get("scan_id", "")),
+                h.get("finished_at", ""),
+                h.get("role", ""),
+                h.get("open_ports", ""),
+                str(h.get("attention_score_total", 0)),
+                h.get("network", ""),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                history_table.setItem(row, col, item)
+        history_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(history_table)
+
+
+class ScanHistoryDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Історія сканувань")
+        self.resize(900, 560)
+
+        layout = QVBoxLayout(self)
+
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(6)
+        self.history_table.setHorizontalHeaderLabels([
+            "Scan ID",
+            "Network",
+            "Finished",
+            "Hosts",
+            "Attention",
+            "Summary preview",
+        ])
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.itemSelectionChanged.connect(self._show_selected_scan_details)
+        layout.addWidget(self.history_table)
+
+        self.detail_label = QLabel("Оберіть сканування для перегляду деталей.")
+        self.detail_label.setWordWrap(True)
+        layout.addWidget(self.detail_label)
+
+        self.events_table = QTableWidget()
+        self.events_table.setColumnCount(2)
+        self.events_table.setHorizontalHeaderLabels(["Тип події", "Опис"])
+        self.events_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.events_table)
+
+        self._populate_history()
+
+    def _populate_history(self):
+        scans = get_scan_history(limit=100)
+        self.history_table.setRowCount(len(scans))
+        for row, scan in enumerate(scans):
+            values = [
+                str(scan.get("scan_id", "")),
+                scan.get("network", ""),
+                scan.get("finished_at", ""),
+                str(scan.get("host_count", 0)),
+                str(scan.get("attention_score_total", 0)),
+                scan.get("summary_preview", ""),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                self.history_table.setItem(row, col, item)
+
+    def _show_selected_scan_details(self):
+        selected = self.history_table.selectedItems()
+        if not selected:
+            return
+        row = selected[0].row()
+        scan_id_item = self.history_table.item(row, 0)
+        if scan_id_item is None:
+            return
+        scan_id = int(scan_id_item.text())
+
+        details = get_scan_details(scan_id)
+        if not details:
+            self.detail_label.setText("Деталі сканування не знайдено.")
+            self.events_table.setRowCount(0)
+            return
+
+        self.detail_label.setText(
+            f"Scan ID: {details.get('scan_id')} | "
+            f"Network: {details.get('network')} | "
+            f"Hosts: {details.get('host_count')} | "
+            f"Total attention: {details.get('attention_score_total')}\n\n"
+            f"{details.get('summary_text', '')}"
+        )
+
+        events = details.get("events", [])
+        self.events_table.setRowCount(len(events))
+        for r, event in enumerate(events):
+            type_item = QTableWidgetItem(event.get("event_type", ""))
+            type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            desc_item = QTableWidgetItem(event.get("description", ""))
+            desc_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.events_table.setItem(r, 0, type_item)
+            self.events_table.setItem(r, 1, desc_item)
 
 
 class ScanWorker(QThread):
@@ -90,10 +261,16 @@ class MainWindow(QMainWindow):
 
         self.scan_button = QPushButton("Сканувати")
         self.scan_button.clicked.connect(self.on_scan_clicked)
+        self.history_button = QPushButton("Історія сканувань")
+        self.history_button.clicked.connect(self.on_history_clicked)
+        self.export_button = QPushButton("Експорт")
+        self.export_button.clicked.connect(self.on_export_clicked)
 
         top_layout.addWidget(self.network_label)
         top_layout.addWidget(self.network_input, stretch=1)
         top_layout.addWidget(self.scan_button)
+        top_layout.addWidget(self.history_button)
+        top_layout.addWidget(self.export_button)
 
         main_layout.addLayout(top_layout)
 
@@ -106,6 +283,7 @@ class MainWindow(QMainWindow):
             "Тип вузла / сервіси",
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.cellDoubleClicked.connect(self.on_main_table_double_click)
 
         main_layout.addWidget(self.table)
 
@@ -137,6 +315,7 @@ class MainWindow(QMainWindow):
             "Причини",
         ])
         self.scores_table.horizontalHeader().setStretchLastSection(True)
+        self.scores_table.cellDoubleClicked.connect(self.on_scores_table_double_click)
         main_layout.addWidget(self.scores_table)
 
         self.summary_title_label = QLabel("Підсумок сканування:")
@@ -447,6 +626,52 @@ class MainWindow(QMainWindow):
             "Помилка сканування",
             f"Сканування не вдалося завершити:\n{message}",
         )
+
+    def on_main_table_double_click(self, row: int, column: int):
+        item = self.table.item(row, 0)
+        if item is None:
+            return
+        ip = item.text().strip()
+        if ip:
+            dlg = DevicePassportDialog(ip, self)
+            dlg.exec()
+
+    def on_scores_table_double_click(self, row: int, column: int):
+        item = self.scores_table.item(row, 0)
+        if item is None:
+            return
+        ip = item.text().strip()
+        if ip:
+            dlg = DevicePassportDialog(ip, self)
+            dlg.exec()
+
+    def on_history_clicked(self):
+        dlg = ScanHistoryDialog(self)
+        dlg.exec()
+
+    def on_export_clicked(self):
+        directory = QFileDialog.getExistingDirectory(self, "Виберіть папку для експорту")
+        if not directory:
+            return
+        try:
+            summary_path = f"{directory}/latest_scan_summary.txt"
+            events_path = f"{directory}/latest_scan_events.csv"
+            scores_path = f"{directory}/latest_attention_scores.csv"
+
+            export_latest_summary_txt(summary_path)
+            export_latest_events_csv(events_path)
+            export_latest_scores_csv(scores_path)
+
+            QMessageBox.information(
+                self,
+                "Експорт завершено",
+                "Файли успішно створені:\n"
+                f"- {summary_path}\n"
+                f"- {events_path}\n"
+                f"- {scores_path}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Помилка експорту", str(exc))
 
 
 def run_app():

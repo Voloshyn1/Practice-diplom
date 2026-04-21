@@ -1,11 +1,12 @@
 import sqlite3
+import csv
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 # Файл бази даних буде лежати поруч з .py-файлами
 DB_PATH = Path(__file__).with_name("scanner.db")
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _get_connection():
@@ -285,6 +286,15 @@ def _migration_004_attention_schema(cur):
     )
 
 
+def _migration_005_history_indexes(cur):
+    """
+    Додає індекси для швидших запитів історії та паспорта пристрою.
+    """
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts(ip);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scans_finished_at ON scans(finished_at);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_events_ip_created ON events(ip, created_at);")
+
+
 def inspect_schema_state() -> dict[str, list[str]]:
     """
     Невеликий допоміжний інструмент для дебагу міграцій.
@@ -307,6 +317,7 @@ MIGRATIONS: dict[int, Callable] = {
     2: _migration_002_legacy_columns,
     3: _migration_003_events_schema,
     4: _migration_004_attention_schema,
+    5: _migration_005_history_indexes,
 }
 
 
@@ -712,3 +723,304 @@ def load_summary_for_scan(scan_id: int) -> dict:
         }
     finally:
         conn.close()
+
+
+def get_device_recent_events(ip: str, limit: int = 10) -> list[dict]:
+    """
+    Повертає останні події для вказаного IP.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT scan_id, event_type, old_value, new_value, description, created_at
+            FROM events
+            WHERE ip = ?
+            ORDER BY id DESC
+            LIMIT ?;
+            """,
+            (ip, limit),
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "scan_id": row[0],
+                "event_type": row[1],
+                "old_value": row[2],
+                "new_value": row[3],
+                "description": row[4],
+                "created_at": row[5],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_device_scan_history(ip: str) -> list[dict]:
+    """
+    Повертає історію появ пристрою в скануваннях.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT s.id, s.network, s.started_at, s.finished_at, s.host_count,
+                   h.role, h.open_ports, s.attention_score_total
+            FROM hosts h
+            JOIN scans s ON s.id = h.scan_id
+            WHERE h.ip = ?
+            ORDER BY s.id DESC;
+            """,
+            (ip,),
+        )
+        rows = cur.fetchall()
+        history: list[dict] = []
+        for row in rows:
+            history.append({
+                "scan_id": row[0],
+                "network": row[1],
+                "started_at": row[2],
+                "finished_at": row[3],
+                "host_count": row[4],
+                "role": row[5] or "",
+                "open_ports": row[6] or "",
+                "attention_score_total": int(row[7] or 0),
+            })
+        return history
+    finally:
+        conn.close()
+
+
+def get_device_passport(ip: str) -> dict:
+    """
+    Повертає паспорт пристрою за IP.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT ip, hostname, first_seen, last_seen, last_role, last_open_ports
+            FROM devices
+            WHERE ip = ?;
+            """,
+            (ip,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {}
+
+        cur.execute("SELECT COUNT(*) FROM hosts WHERE ip = ?;", (ip,))
+        appearances = int(cur.fetchone()[0] or 0)
+
+        cur.execute(
+            """
+            SELECT attention_score, attention_level, reasons, scan_id, created_at
+            FROM device_scores
+            WHERE ip = ?
+            ORDER BY id DESC
+            LIMIT 1;
+            """,
+            (ip,),
+        )
+        score_row = cur.fetchone()
+        latest_score = {
+            "attention_score": int(score_row[0]) if score_row else 0,
+            "attention_level": score_row[1] if score_row else "Low",
+            "reasons": score_row[2] if score_row else "",
+            "scan_id": score_row[3] if score_row else None,
+            "created_at": score_row[4] if score_row else "",
+        }
+    finally:
+        conn.close()
+
+    recent_events = get_device_recent_events(ip, limit=10)
+
+    historical_summary = (
+        f"Пристрій {ip} з'являвся у {appearances} скануваннях. "
+        f"Остання роль: {row[4] or '—'}. "
+        f"Останні порти: {row[5] or '—'}."
+    )
+
+    return {
+        "ip": row[0],
+        "hostname": row[1] or "",
+        "first_seen": row[2] or "",
+        "last_seen": row[3] or "",
+        "current_role": row[4] or "",
+        "current_open_ports": row[5] or "",
+        "appearances": appearances,
+        "latest_score": latest_score,
+        "recent_events": recent_events,
+        "historical_summary": historical_summary,
+    }
+
+
+def get_scan_history(limit: int = 50) -> list[dict]:
+    """
+    Повертає список останніх сканувань.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, network, started_at, finished_at, host_count, attention_score_total, summary_text
+            FROM scans
+            ORDER BY id DESC
+            LIMIT ?;
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        result: list[dict] = []
+        for row in rows:
+            summary_text = row[6] or ""
+            preview = summary_text.splitlines()[0] if summary_text else ""
+            result.append({
+                "scan_id": row[0],
+                "network": row[1],
+                "started_at": row[2],
+                "finished_at": row[3],
+                "host_count": int(row[4] or 0),
+                "attention_score_total": int(row[5] or 0),
+                "summary_preview": preview,
+            })
+        return result
+    finally:
+        conn.close()
+
+
+def get_scan_details(scan_id: int) -> dict:
+    """
+    Повертає деталі конкретного сканування: summary, events, scores.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, network, started_at, finished_at, host_count, attention_score_total, summary_text
+            FROM scans
+            WHERE id = ?;
+            """,
+            (scan_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {}
+    finally:
+        conn.close()
+
+    return {
+        "scan_id": row[0],
+        "network": row[1],
+        "started_at": row[2],
+        "finished_at": row[3],
+        "host_count": int(row[4] or 0),
+        "attention_score_total": int(row[5] or 0),
+        "summary_text": row[6] or "",
+        "events": load_events_for_scan(scan_id),
+        "scores": load_device_scores_for_scan(scan_id),
+    }
+
+
+def _get_latest_scan_id() -> int | None:
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM scans ORDER BY id DESC LIMIT 1;")
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def export_latest_summary_txt(path: str):
+    """
+    Експортує підсумок останнього сканування у TXT.
+    """
+    latest_scan_id = _get_latest_scan_id()
+    if latest_scan_id is None:
+        raise ValueError("Немає сканувань для експорту.")
+
+    details = get_scan_details(latest_scan_id)
+    top_scores = details.get("scores", [])[:3]
+
+    output = [
+        f"ID сканування: {details.get('scan_id')}",
+        f"Мережа: {details.get('network')}",
+        f"Початок: {details.get('started_at')}",
+        f"Завершення: {details.get('finished_at')}",
+        f"Активних хостів: {details.get('host_count')}",
+        f"Загальна оцінка уваги: {details.get('attention_score_total')}",
+        "",
+        "Підсумок:",
+        details.get("summary_text", ""),
+        "",
+        "ТОП хостів за увагою:",
+    ]
+    for item in top_scores:
+        reasons = "; ".join(item.get("reasons", []))
+        output.append(
+            f"- {item.get('ip')}: {item.get('attention_score')} "
+            f"({item.get('attention_level')}) | {reasons}"
+        )
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(output), encoding="utf-8")
+
+
+def export_latest_events_csv(path: str):
+    """
+    Експортує події останнього сканування у CSV.
+    """
+    latest_scan_id = _get_latest_scan_id()
+    if latest_scan_id is None:
+        raise ValueError("Немає сканувань для експорту.")
+
+    events = load_events_for_scan(latest_scan_id)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["id", "scan_id", "ip", "event_type", "old_value", "new_value", "description", "created_at"])
+        for event in events:
+            writer.writerow([
+                event.get("id", ""),
+                event.get("scan_id", ""),
+                event.get("ip", ""),
+                event.get("event_type", ""),
+                event.get("old_value", ""),
+                event.get("new_value", ""),
+                event.get("description", ""),
+                event.get("created_at", ""),
+            ])
+
+
+def export_latest_scores_csv(path: str):
+    """
+    Експортує оцінки уваги останнього сканування у CSV.
+    """
+    latest_scan_id = _get_latest_scan_id()
+    if latest_scan_id is None:
+        raise ValueError("Немає сканувань для експорту.")
+
+    scores = load_device_scores_for_scan(latest_scan_id)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["scan_id", "ip", "attention_score", "attention_level", "reasons"])
+        for item in scores:
+            writer.writerow([
+                latest_scan_id,
+                item.get("ip", ""),
+                item.get("attention_score", 0),
+                item.get("attention_level", ""),
+                "; ".join(item.get("reasons", [])),
+            ])
