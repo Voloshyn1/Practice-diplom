@@ -18,8 +18,15 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 
+from analyzer import compare_scans, get_previous_scan_data
 from scanner import scan_network
-from storage import init_db, save_scan
+from storage import (
+    init_db,
+    load_events_for_scan,
+    load_hosts_for_scan,
+    save_events,
+    save_scan,
+)
 
 
 class ScanWorker(QThread):
@@ -96,6 +103,22 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self.table)
 
+        self.changes_title_label = QLabel("Виявлені зміни:")
+        main_layout.addWidget(self.changes_title_label)
+
+        self.changes_table = QTableWidget()
+        self.changes_table.setColumnCount(2)
+        self.changes_table.setHorizontalHeaderLabels([
+            "Тип події",
+            "Опис",
+        ])
+        self.changes_table.horizontalHeader().setStretchLastSection(True)
+        main_layout.addWidget(self.changes_table)
+
+        self.changes_status_label = QLabel("")
+        self.changes_status_label.setAlignment(Qt.AlignLeft)
+        main_layout.addWidget(self.changes_status_label)
+
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
@@ -142,6 +165,8 @@ class MainWindow(QMainWindow):
 
         # Очищаємо попередню таблицю
         self.table.setRowCount(0)
+        self.changes_table.setRowCount(0)
+        self.changes_status_label.setText("")
         self.scan_id_label.setText("")
 
         # Скидаємо прогрес-бар
@@ -277,6 +302,59 @@ class MainWindow(QMainWindow):
             )
 
         self.scan_id_label.setText(f"ID останнього скану: {scan_id}")
+
+        # Порівнюємо з попереднім скануванням цієї ж підмережі
+        try:
+            self._process_scan_changes(network=network, current_scan_id=scan_id)
+        except Exception as exc:
+            self.changes_table.setRowCount(0)
+            self.changes_status_label.setText("Не вдалося виконати аналіз змін.")
+            QMessageBox.warning(
+                self,
+                "Попередження",
+                f"Скан збережено, але аналіз змін завершився помилкою:\n{exc}",
+            )
+
+    def _process_scan_changes(self, network: str, current_scan_id: int):
+        """
+        Аналізує зміни між поточним і попереднім скануванням.
+        """
+        previous_scan_id, previous_hosts = get_previous_scan_data(network, current_scan_id)
+        if previous_scan_id is None:
+            self.changes_table.setRowCount(0)
+            self.changes_status_label.setText(
+                "Попереднього сканування для порівняння не знайдено."
+            )
+            return
+
+        current_hosts = load_hosts_for_scan(current_scan_id)
+        events = compare_scans(previous_hosts, current_hosts)
+        save_events(current_scan_id, events)
+
+        saved_events = load_events_for_scan(current_scan_id)
+        if not saved_events:
+            self.changes_table.setRowCount(0)
+            self.changes_status_label.setText(
+                "Змін порівняно з попереднім скануванням не виявлено."
+            )
+            return
+
+        self.changes_status_label.setText(
+            f"Виявлено змін: {len(saved_events)}"
+        )
+        self.changes_table.setRowCount(len(saved_events))
+
+        for row, event in enumerate(saved_events):
+            event_type = event.get("event_type", "")
+            description = event.get("description", "")
+
+            type_item = QTableWidgetItem(event_type)
+            type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            description_item = QTableWidgetItem(description)
+            description_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+            self.changes_table.setItem(row, 0, type_item)
+            self.changes_table.setItem(row, 1, description_item)
 
     def on_scan_error(self, message: str):
         """

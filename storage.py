@@ -5,7 +5,7 @@ from typing import Callable
 
 # Файл бази даних буде лежати поруч з .py-файлами
 DB_PATH = Path(__file__).with_name("scanner.db")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _get_connection():
@@ -216,6 +216,33 @@ def _migration_002_legacy_columns(cur):
         )
 
 
+def _migration_003_events_schema(cur):
+    """
+    Додає таблицю подій змін між скануваннями.
+    """
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id INTEGER NOT NULL,
+            ip TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            old_value TEXT NOT NULL DEFAULT '',
+            new_value TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE CASCADE
+        );
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_scan_id ON events(scan_id);"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_ip ON events(ip);"
+    )
+
+
 def inspect_schema_state() -> dict[str, list[str]]:
     """
     Невеликий допоміжний інструмент для дебагу міграцій.
@@ -224,7 +251,7 @@ def inspect_schema_state() -> dict[str, list[str]]:
     conn = _get_connection()
     try:
         cur = conn.cursor()
-        tables = ["meta", "devices", "scans", "hosts"]
+        tables = ["meta", "devices", "scans", "hosts", "events"]
         return {
             table: sorted(_get_table_columns(cur, table))
             for table in tables
@@ -236,6 +263,7 @@ def inspect_schema_state() -> dict[str, list[str]]:
 MIGRATIONS: dict[int, Callable] = {
     1: _migration_001_initial_schema,
     2: _migration_002_legacy_columns,
+    3: _migration_003_events_schema,
 }
 
 
@@ -382,3 +410,152 @@ def save_scan(
             return scan_id
     finally:
         conn.close()
+
+
+def get_previous_scan_id(network: str, current_scan_id: int) -> int | None:
+    """
+    Повертає id попереднього сканування для тієї ж підмережі.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id
+            FROM scans
+            WHERE network = ? AND id < ?
+            ORDER BY id DESC
+            LIMIT 1;
+            """,
+            (network, current_scan_id),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def load_hosts_for_scan(scan_id: int) -> list[dict]:
+    """
+    Завантажує список хостів для конкретного сканування.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT ip, open_ports, role
+            FROM hosts
+            WHERE scan_id = ?
+            ORDER BY ip;
+            """,
+            (scan_id,),
+        )
+        rows = cur.fetchall()
+        result: list[dict] = []
+        for ip, ports_str, role in rows:
+            ports = []
+            if ports_str:
+                ports = [int(p) for p in ports_str.split(",") if p.strip()]
+            result.append({
+                "ip": ip,
+                "open_ports": ports,
+                "role": role or "",
+            })
+        return result
+    finally:
+        conn.close()
+
+
+def save_events(scan_id: int, events: list[dict]):
+    """
+    Зберігає події для конкретного сканування.
+    """
+    if not events:
+        return
+
+    conn = _get_connection()
+    try:
+        with conn:
+            cur = conn.cursor()
+            for event in events:
+                cur.execute(
+                    """
+                    INSERT INTO events (
+                        scan_id, ip, event_type, old_value, new_value, description, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        scan_id,
+                        event.get("ip", ""),
+                        event.get("event_type", ""),
+                        event.get("old_value", ""),
+                        event.get("new_value", ""),
+                        event.get("description", ""),
+                        datetime.now().isoformat(),
+                    ),
+                )
+    finally:
+        conn.close()
+
+
+def load_events_for_scan(scan_id: int) -> list[dict]:
+    """
+    Завантажує події для конкретного сканування.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, scan_id, ip, event_type, old_value, new_value, description, created_at
+            FROM events
+            WHERE scan_id = ?
+            ORDER BY id ASC;
+            """,
+            (scan_id,),
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "id": row[0],
+                "scan_id": row[1],
+                "ip": row[2],
+                "event_type": row[3],
+                "old_value": row[4],
+                "new_value": row[5],
+                "description": row[6],
+                "created_at": row[7],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def load_events_for_latest_scan(network: str) -> list[dict]:
+    """
+    Завантажує події для останнього сканування конкретної підмережі.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id
+            FROM scans
+            WHERE network = ?
+            ORDER BY id DESC
+            LIMIT 1;
+            """,
+            (network,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return []
+        latest_scan_id = row[0]
+    finally:
+        conn.close()
+
+    return load_events_for_scan(latest_scan_id)
