@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QDialog,
     QFileDialog,
+    QComboBox,
 )
 
 from analyzer import compare_scans, get_previous_scan_data
@@ -63,6 +64,8 @@ class DevicePassportDialog(QDialog):
         summary = QLabel(
             f"IP: {passport.get('ip', '')}\n"
             f"Hostname: {passport.get('hostname') or '—'}\n"
+            f"MAC: {passport.get('mac') or '—'}\n"
+            f"Vendor: {passport.get('vendor') or '—'}\n"
             f"First seen: {passport.get('first_seen') or '—'}\n"
             f"Last seen: {passport.get('last_seen') or '—'}\n"
             f"Поточна роль: {passport.get('current_role') or '—'}\n"
@@ -117,6 +120,7 @@ class DevicePassportDialog(QDialog):
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 history_table.setItem(row, col, item)
         history_table.horizontalHeader().setStretchLastSection(True)
+        history_table.setSortingEnabled(True)
         layout.addWidget(history_table)
 
 
@@ -139,6 +143,7 @@ class ScanHistoryDialog(QDialog):
             "Summary preview",
         ])
         self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.setSortingEnabled(True)
         self.history_table.itemSelectionChanged.connect(self._show_selected_scan_details)
         layout.addWidget(self.history_table)
 
@@ -150,6 +155,7 @@ class ScanHistoryDialog(QDialog):
         self.events_table.setColumnCount(2)
         self.events_table.setHorizontalHeaderLabels(["Тип події", "Опис"])
         self.events_table.horizontalHeader().setStretchLastSection(True)
+        self.events_table.setSortingEnabled(True)
         layout.addWidget(self.events_table)
 
         self._populate_history()
@@ -214,9 +220,11 @@ class ScanWorker(QThread):
     progress = Signal(int, int, object)  # current, total, host_info (dict або None)
     error = Signal(str)
 
-    def __init__(self, network: str, parent=None):
+    def __init__(self, network: str, ports: list[int], discovery_mode: str, parent=None):
         super().__init__(parent)
         self.network = network
+        self.ports = ports
+        self.discovery_mode = discovery_mode
 
     def run(self):
         try:
@@ -226,7 +234,12 @@ class ScanWorker(QThread):
             def progress_cb(current: int, total: int, host_info):
                 self.progress.emit(current, total, host_info)
 
-            hosts = scan_network(self.network, progress_cb=progress_cb)
+            hosts = scan_network(
+                self.network,
+                ports=self.ports,
+                progress_cb=progress_cb,
+                discovery_mode=self.discovery_mode,
+            )
             finished_at = datetime.now()
             self.finished.emit(hosts, self.network, started_at, finished_at)
         except Exception as exc:
@@ -243,6 +256,7 @@ class MainWindow(QMainWindow):
         init_db()
 
         self.worker: ScanWorker | None = None
+        self.last_progress_total: int = 0
 
 
         central = QWidget(self)
@@ -259,6 +273,15 @@ class MainWindow(QMainWindow):
         self.network_input.setPlaceholderText("наприклад, 192.168.0.0/24")
         self.network_input.setText("192.168.0.0/24")  # значення за замовчуванням
 
+        self.ports_input = QLineEdit()
+        self.ports_input.setPlaceholderText("Порти: 22,80,443,3389,445")
+        self.ports_input.setText("22,80,443,3389,445")
+
+        self.discovery_mode = QComboBox()
+        self.discovery_mode.addItem("Змішаний (ICMP + TCP)", "mixed")
+        self.discovery_mode.addItem("ICMP", "icmp")
+        self.discovery_mode.addItem("TCP", "tcp")
+
         self.scan_button = QPushButton("Сканувати")
         self.scan_button.clicked.connect(self.on_scan_clicked)
         self.history_button = QPushButton("Історія сканувань")
@@ -268,6 +291,8 @@ class MainWindow(QMainWindow):
 
         top_layout.addWidget(self.network_label)
         top_layout.addWidget(self.network_input, stretch=1)
+        top_layout.addWidget(self.ports_input, stretch=1)
+        top_layout.addWidget(self.discovery_mode)
         top_layout.addWidget(self.scan_button)
         top_layout.addWidget(self.history_button)
         top_layout.addWidget(self.export_button)
@@ -284,6 +309,7 @@ class MainWindow(QMainWindow):
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.cellDoubleClicked.connect(self.on_main_table_double_click)
+        self.table.setSortingEnabled(True)
 
         main_layout.addWidget(self.table)
 
@@ -297,6 +323,7 @@ class MainWindow(QMainWindow):
             "Опис",
         ])
         self.changes_table.horizontalHeader().setStretchLastSection(True)
+        self.changes_table.setSortingEnabled(True)
         main_layout.addWidget(self.changes_table)
 
         self.changes_status_label = QLabel("")
@@ -316,6 +343,7 @@ class MainWindow(QMainWindow):
         ])
         self.scores_table.horizontalHeader().setStretchLastSection(True)
         self.scores_table.cellDoubleClicked.connect(self.on_scores_table_double_click)
+        self.scores_table.setSortingEnabled(True)
         main_layout.addWidget(self.scores_table)
 
         self.summary_title_label = QLabel("Підсумок сканування:")
@@ -351,6 +379,42 @@ class MainWindow(QMainWindow):
     def _set_scan_controls_enabled(self, enabled: bool):
         self.scan_button.setEnabled(enabled)
         self.network_input.setEnabled(enabled)
+        self.ports_input.setEnabled(enabled)
+        self.discovery_mode.setEnabled(enabled)
+
+    def _parse_ports_input(self) -> list[int] | None:
+        raw = self.ports_input.text().strip()
+        if not raw:
+            return [22, 80, 443, 3389, 445]
+
+        try:
+            ports = []
+            for chunk in raw.split(","):
+                value = chunk.strip()
+                if not value:
+                    continue
+                port = int(value)
+                if port < 1 or port > 65535:
+                    raise ValueError
+                ports.append(port)
+            ports = sorted(set(ports))
+            if not ports:
+                raise ValueError
+            if len(ports) > 100:
+                QMessageBox.warning(
+                    self,
+                    "Забагато портів",
+                    "Для стабільної роботи вкажіть не більше 100 портів.",
+                )
+                return None
+            return ports
+        except ValueError:
+            QMessageBox.warning(
+                self,
+                "Помилка формату портів",
+                "Введіть порти у форматі: 22,80,443",
+            )
+            return None
 
     def on_scan_clicked(self):
         network = self.network_input.text().strip()
@@ -366,9 +430,13 @@ class MainWindow(QMainWindow):
                 "Введіть CIDR у форматі, наприклад: 192.168.0.0/24",
             )
             return
+        ports = self._parse_ports_input()
+        if ports is None:
+            return
 
         # Блокуємо елементи на час сканування
         self._set_scan_controls_enabled(False)
+        self.last_progress_total = 0
 
         # Очищаємо попередню таблицю
         self.table.setRowCount(0)
@@ -382,10 +450,15 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 0)  # невизначений прогрес, поки не знаємо total
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat(f"Сканування {network} ...")
-        self.status_label.setText(f"Сканування {network} ...")
+        mode_label = self.discovery_mode.currentData()
+        self.status_label.setText(f"Сканування {network} (mode: {mode_label}) ...")
 
         # Стартуємо потік зі сканером
-        self.worker = ScanWorker(network)
+        self.worker = ScanWorker(
+            network=network,
+            ports=ports,
+            discovery_mode=self.discovery_mode.currentData(),
+        )
         self.worker.finished.connect(self.on_scan_finished)
         self.worker.progress.connect(self.on_scan_progress)
         self.worker.error.connect(self.on_scan_error)
@@ -401,6 +474,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.setRange(0, total)
 
         self.progress_bar.setValue(current)
+        self.last_progress_total = total
         self.progress_bar.setFormat(f"Сканування: {current}/{total} адрес")
         self.status_label.setText(
             f"Сканування {self.network_input.text().strip() or 'підмережі'}: "
@@ -459,6 +533,7 @@ class MainWindow(QMainWindow):
         # Якщо ми не додавали хости "на льоту", можна
         # перезаповнити таблицю тут (на випадок змін)
         # Спочатку очищаємо, щоб не було дубляжу
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.table.setRowCount(len(hosts))
         for row, host in enumerate(hosts):
@@ -483,9 +558,11 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 2, role_item)
 
         # Завершуємо прогрес-бар
-        self.progress_bar.setRange(0, len(hosts) if hosts else 1)
-        self.progress_bar.setValue(len(hosts))
+        total = self.last_progress_total if self.last_progress_total > 0 else 1
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(total)
         self.progress_bar.setFormat("Сканування завершено.")
+        self.table.setSortingEnabled(True)
 
         # Зберігаємо в БД
         try:
@@ -502,13 +579,9 @@ class MainWindow(QMainWindow):
 
         # Оновлюємо статуси
         if hosts:
-            self.status_label.setText(
-                f"Сканування завершено. Знайдено {len(hosts)} активних хостів."
-            )
+            self.status_label.setText(f"Завершено: активних хостів {len(hosts)}.")
         else:
-            self.status_label.setText(
-                "Сканування завершено. Активних хостів не знайдено."
-            )
+            self.status_label.setText("Завершено: активних хостів не знайдено.")
 
         self.scan_id_label.setText(f"ID останнього скану: {scan_id}")
 
@@ -566,6 +639,7 @@ class MainWindow(QMainWindow):
 
                 self.changes_table.setItem(row, 0, type_item)
                 self.changes_table.setItem(row, 1, description_item)
+            self.changes_table.setSortingEnabled(True)
 
         # Рахуємо і зберігаємо оцінки уваги
         host_scores = calculate_host_scores(saved_events)
@@ -583,6 +657,16 @@ class MainWindow(QMainWindow):
 
             level_item = QTableWidgetItem(item.get("attention_level", "Low"))
             level_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            level_text = item.get("attention_level", "Low")
+            if level_text == "Moderate":
+                level_item.setBackground(Qt.yellow)
+            elif level_text == "Elevated":
+                level_item.setBackground(Qt.darkYellow)
+            elif level_text == "High":
+                level_item.setBackground(Qt.red)
+            elif level_text == "Critical":
+                level_item.setBackground(Qt.darkRed)
+                level_item.setForeground(Qt.white)
 
             reasons_text = "; ".join(item.get("reasons", []))
             reasons_item = QTableWidgetItem(reasons_text)
@@ -592,6 +676,7 @@ class MainWindow(QMainWindow):
             self.scores_table.setItem(row, 1, score_item)
             self.scores_table.setItem(row, 2, level_item)
             self.scores_table.setItem(row, 3, reasons_item)
+        self.scores_table.setSortingEnabled(True)
 
         attention_total = calculate_scan_attention_total(saved_scores)
         summary_text = build_scan_summary(

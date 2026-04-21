@@ -1,6 +1,7 @@
 BASE_EVENT_SCORES = {
     "NEW_HOST": 20,
     "HOST_DISAPPEARED": 12,
+    "HOST_IP_CHANGED": 10,
     "NEW_PORT_OPENED": 12,
     "PORT_CLOSED": 4,
     "ROLE_CHANGED": 10,
@@ -59,6 +60,8 @@ def build_reasons_for_host(events: list[dict]) -> list[str]:
                 reasons.append("На хості закрився порт")
         elif event_type == "ROLE_CHANGED":
             reasons.append("Змінилася роль вузла")
+        elif event_type == "HOST_IP_CHANGED":
+            reasons.append("Пристрій змінив IP-адресу")
 
     # Уникаємо дублювання причин, зберігаючи порядок
     unique_reasons = list(dict.fromkeys(reasons))

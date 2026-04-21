@@ -6,7 +6,7 @@ from typing import Callable
 
 # Файл бази даних буде лежати поруч з .py-файлами
 DB_PATH = Path(__file__).with_name("scanner.db")
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _get_connection():
@@ -295,6 +295,42 @@ def _migration_005_history_indexes(cur):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_events_ip_created ON events(ip, created_at);")
 
 
+def _migration_006_host_enrichment(cur):
+    """
+    Додає поля для MAC/vendor у devices та hosts.
+    """
+    if _table_exists(cur, "devices"):
+        _ensure_column(
+            cur,
+            table_name="devices",
+            column_name="mac",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            cur,
+            table_name="devices",
+            column_name="vendor",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+
+    if _table_exists(cur, "hosts"):
+        _ensure_column(
+            cur,
+            table_name="hosts",
+            column_name="mac",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            cur,
+            table_name="hosts",
+            column_name="vendor",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hosts_mac ON hosts(mac);")
+
+
 def inspect_schema_state() -> dict[str, list[str]]:
     """
     Невеликий допоміжний інструмент для дебагу міграцій.
@@ -318,6 +354,7 @@ MIGRATIONS: dict[int, Callable] = {
     3: _migration_003_events_schema,
     4: _migration_004_attention_schema,
     5: _migration_005_history_indexes,
+    6: _migration_006_host_enrichment,
 }
 
 
@@ -345,6 +382,8 @@ def _upsert_device(
     *,
     ip: str,
     hostname: str,
+    mac: str,
+    vendor: str,
     role: str,
     open_ports_str: str,
     seen_at: datetime,
@@ -365,12 +404,14 @@ def _upsert_device(
             """
             UPDATE devices
             SET hostname = ?,
+                mac = ?,
+                vendor = ?,
                 last_seen = ?,
                 last_role = ?,
                 last_open_ports = ?
             WHERE id = ?;
             """,
-            (hostname, seen_iso, role, open_ports_str, device_id),
+            (hostname, mac, vendor, seen_iso, role, open_ports_str, device_id),
         )
         return device_id
     else:
@@ -378,11 +419,11 @@ def _upsert_device(
         cur.execute(
             """
             INSERT INTO devices (
-                ip, hostname, first_seen, last_seen, last_role, last_open_ports
+                ip, hostname, mac, vendor, first_seen, last_seen, last_role, last_open_ports
             )
-            VALUES (?, ?, ?, ?, ?, ?);
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """,
-            (ip, hostname, seen_iso, seen_iso, role, open_ports_str),
+            (ip, hostname, mac, vendor, seen_iso, seen_iso, role, open_ports_str),
         )
         return cur.lastrowid
 
@@ -439,6 +480,8 @@ def save_scan(
                 ports = host.get("open_ports", [])
                 role = host.get("role", "")
                 hostname = host.get("hostname", "")
+                mac = host.get("mac", "")
+                vendor = host.get("vendor", "")
 
                 ports_str = ",".join(str(p) for p in ports) if ports else ""
 
@@ -447,6 +490,8 @@ def save_scan(
                     cur,
                     ip=ip,
                     hostname=hostname,
+                    mac=mac,
+                    vendor=vendor,
                     role=role,
                     open_ports_str=ports_str,
                     seen_at=finished_at,
@@ -455,10 +500,10 @@ def save_scan(
                 # Запис у таблицю hosts (конкретний результат цього скану)
                 cur.execute(
                     """
-                    INSERT INTO hosts (scan_id, device_id, ip, hostname, open_ports, role)
-                    VALUES (?, ?, ?, ?, ?, ?);
+                    INSERT INTO hosts (scan_id, device_id, ip, hostname, mac, vendor, open_ports, role)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                     """,
-                    (scan_id, device_id, ip, hostname, ports_str, role),
+                    (scan_id, device_id, ip, hostname, mac, vendor, ports_str, role),
                 )
 
             return scan_id
@@ -498,7 +543,7 @@ def load_hosts_for_scan(scan_id: int) -> list[dict]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT ip, open_ports, role
+            SELECT ip, hostname, mac, vendor, open_ports, role
             FROM hosts
             WHERE scan_id = ?
             ORDER BY ip;
@@ -507,12 +552,15 @@ def load_hosts_for_scan(scan_id: int) -> list[dict]:
         )
         rows = cur.fetchall()
         result: list[dict] = []
-        for ip, ports_str, role in rows:
+        for ip, hostname, mac, vendor, ports_str, role in rows:
             ports = []
             if ports_str:
                 ports = [int(p) for p in ports_str.split(",") if p.strip()]
             result.append({
                 "ip": ip,
+                "hostname": hostname or "",
+                "mac": mac or "",
+                "vendor": vendor or "",
                 "open_ports": ports,
                 "role": role or "",
             })
@@ -768,7 +816,7 @@ def get_device_scan_history(ip: str) -> list[dict]:
         cur.execute(
             """
             SELECT s.id, s.network, s.started_at, s.finished_at, s.host_count,
-                   h.role, h.open_ports, s.attention_score_total
+                   h.role, h.open_ports, h.hostname, h.mac, h.vendor, s.attention_score_total
             FROM hosts h
             JOIN scans s ON s.id = h.scan_id
             WHERE h.ip = ?
@@ -787,7 +835,10 @@ def get_device_scan_history(ip: str) -> list[dict]:
                 "host_count": row[4],
                 "role": row[5] or "",
                 "open_ports": row[6] or "",
-                "attention_score_total": int(row[7] or 0),
+                "hostname": row[7] or "",
+                "mac": row[8] or "",
+                "vendor": row[9] or "",
+                "attention_score_total": int(row[10] or 0),
             })
         return history
     finally:
@@ -803,7 +854,7 @@ def get_device_passport(ip: str) -> dict:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT ip, hostname, first_seen, last_seen, last_role, last_open_ports
+            SELECT ip, hostname, mac, vendor, first_seen, last_seen, last_role, last_open_ports
             FROM devices
             WHERE ip = ?;
             """,
@@ -841,17 +892,19 @@ def get_device_passport(ip: str) -> dict:
 
     historical_summary = (
         f"Пристрій {ip} з'являвся у {appearances} скануваннях. "
-        f"Остання роль: {row[4] or '—'}. "
-        f"Останні порти: {row[5] or '—'}."
+        f"Остання роль: {row[6] or '—'}. "
+        f"Останні порти: {row[7] or '—'}."
     )
 
     return {
         "ip": row[0],
         "hostname": row[1] or "",
-        "first_seen": row[2] or "",
-        "last_seen": row[3] or "",
-        "current_role": row[4] or "",
-        "current_open_ports": row[5] or "",
+        "mac": row[2] or "",
+        "vendor": row[3] or "",
+        "first_seen": row[4] or "",
+        "last_seen": row[5] or "",
+        "current_role": row[6] or "",
+        "current_open_ports": row[7] or "",
         "appearances": appearances,
         "latest_score": latest_score,
         "recent_events": recent_events,
