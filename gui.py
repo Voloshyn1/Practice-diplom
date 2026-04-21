@@ -1,4 +1,5 @@
 import sys
+import ipaddress
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -27,22 +28,25 @@ class ScanWorker(QThread):
     """
     finished = Signal(list, str, datetime, datetime)  # hosts, network, started_at, finished_at
     progress = Signal(int, int, object)  # current, total, host_info (dict або None)
+    error = Signal(str)
 
     def __init__(self, network: str, parent=None):
         super().__init__(parent)
         self.network = network
 
     def run(self):
-        started_at = datetime.now()
+        try:
+            started_at = datetime.now()
 
-        # Локальна функція, яку передамо в scanner.scan_network
-        # ВАЖЛИВО: scan_network має приймати параметр progress_cb
-        def progress_cb(current: int, total: int, host_info):
-            self.progress.emit(current, total, host_info)
+            # Локальна функція, яку передамо в scanner.scan_network
+            def progress_cb(current: int, total: int, host_info):
+                self.progress.emit(current, total, host_info)
 
-        hosts = scan_network(self.network, progress_cb=progress_cb)
-        finished_at = datetime.now()
-        self.finished.emit(hosts, self.network, started_at, finished_at)
+            hosts = scan_network(self.network, progress_cb=progress_cb)
+            finished_at = datetime.now()
+            self.finished.emit(hosts, self.network, started_at, finished_at)
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -114,17 +118,27 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(bottom_layout)
 
-
+    def _set_scan_controls_enabled(self, enabled: bool):
+        self.scan_button.setEnabled(enabled)
+        self.network_input.setEnabled(enabled)
 
     def on_scan_clicked(self):
         network = self.network_input.text().strip()
         if not network:
             QMessageBox.warning(self, "Помилка", "Будь ласка, введіть підмережу.")
             return
+        try:
+            ipaddress.ip_network(network, strict=False)
+        except ValueError:
+            QMessageBox.warning(
+                self,
+                "Помилка формату підмережі",
+                "Введіть CIDR у форматі, наприклад: 192.168.0.0/24",
+            )
+            return
 
         # Блокуємо елементи на час сканування
-        self.scan_button.setEnabled(False)
-        self.network_input.setEnabled(False)
+        self._set_scan_controls_enabled(False)
 
         # Очищаємо попередню таблицю
         self.table.setRowCount(0)
@@ -140,6 +154,7 @@ class MainWindow(QMainWindow):
         self.worker = ScanWorker(network)
         self.worker.finished.connect(self.on_scan_finished)
         self.worker.progress.connect(self.on_scan_progress)
+        self.worker.error.connect(self.on_scan_error)
         self.worker.start()
 
     def on_scan_progress(self, current: int, total: int, host_info):
@@ -205,8 +220,7 @@ class MainWindow(QMainWindow):
         hosts = normalized_hosts
 
         # Розблоковуємо кнопки
-        self.scan_button.setEnabled(True)
-        self.network_input.setEnabled(True)
+        self._set_scan_controls_enabled(True)
 
         # Якщо ми не додавали хости "на льоту", можна
         # перезаповнити таблицю тут (на випадок змін)
@@ -240,7 +254,17 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("Сканування завершено.")
 
         # Зберігаємо в БД
-        scan_id = save_scan(network, started_at, finished_at, hosts)
+        try:
+            scan_id = save_scan(network, started_at, finished_at, hosts)
+        except Exception as exc:
+            self.progress_bar.setFormat("Сканування завершено, але збереження не вдалося.")
+            self.status_label.setText("Помилка збереження результатів сканування.")
+            QMessageBox.critical(
+                self,
+                "Помилка БД",
+                f"Не вдалося зберегти результати сканування:\n{exc}",
+            )
+            return
 
         # Оновлюємо статуси
         if hosts:
@@ -253,6 +277,21 @@ class MainWindow(QMainWindow):
             )
 
         self.scan_id_label.setText(f"ID останнього скану: {scan_id}")
+
+    def on_scan_error(self, message: str):
+        """
+        Обробка помилок сканування з worker-потоку.
+        """
+        self._set_scan_controls_enabled(True)
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Сканування завершилося з помилкою.")
+        self.status_label.setText("Помилка під час сканування.")
+        QMessageBox.critical(
+            self,
+            "Помилка сканування",
+            f"Сканування не вдалося завершити:\n{message}",
+        )
 
 
 def run_app():

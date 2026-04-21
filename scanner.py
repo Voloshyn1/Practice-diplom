@@ -1,4 +1,5 @@
 import ipaddress          # для роботи з підмережами типу 192.168.0.0/24
+import platform
 import subprocess         # для запуску системної команди ping
 import socket             # для перевірки TCP-портів
 
@@ -7,17 +8,31 @@ import socket             # для перевірки TCP-портів
 DEFAULT_PORTS = [22, 80, 443, 3389, 445]
 
 
-def ping_host(ip: str) -> bool:
+def ping_host(ip: str, timeout_sec: float = 0.3) -> bool:
     """
     Перевіряє, чи відповідає хост на ping.
     Повертає True, якщо є відповідь, і False, якщо ні.
     """
-    result = subprocess.run(
-        ["ping", "-n", "1", "-w", "200", ip],  # 1 пакет, таймаут 200 мс
-        stdout=subprocess.DEVNULL,            # не показуємо текст ping
-        stderr=subprocess.DEVNULL
-    )
-    return result.returncode == 0  # 0 = успіх (є відповідь)
+    os_name = platform.system().lower()
+
+    if os_name == "windows":
+        timeout_ms = max(1, int(timeout_sec * 1000))
+        cmd = ["ping", "-n", "1", "-w", str(timeout_ms), ip]
+    else:
+        # Для Linux/macOS: 1 echo-запит, а обмеження часу додатково
+        # контролюється через timeout у subprocess.run.
+        cmd = ["ping", "-c", "1", ip]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=max(1.0, timeout_sec + 0.7),
+        )
+        return result.returncode == 0  # 0 = успіх (є відповідь)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
 
 
 def scan_ports(ip: str, ports=None, timeout: float = 0.3) -> list[int]:
@@ -109,4 +124,3 @@ def scan_network(network_cidr: str, ports=None, progress_cb=None) -> list[dict]:
             progress_cb(idx, total, host_info)
 
     return alive_hosts
-
