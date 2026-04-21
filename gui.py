@@ -25,6 +25,7 @@ from analyzer import compare_scans, get_previous_scan_data
 from report import build_scan_summary
 from risk import calculate_host_scores, calculate_scan_attention_total, derive_attention_level
 from scanner import scan_network
+from ports_data import DEFAULT_TCP_PORTS
 from storage import (
     export_latest_events_csv,
     export_latest_scores_csv,
@@ -275,7 +276,7 @@ class MainWindow(QMainWindow):
 
         self.ports_input = QLineEdit()
         self.ports_input.setPlaceholderText("Порти: 22,80,443,3389,445")
-        self.ports_input.setText("22,80,443,3389,445")
+        self.ports_input.setText(",".join(str(p) for p in DEFAULT_TCP_PORTS))
 
         self.discovery_mode = QComboBox()
         self.discovery_mode.addItem("Змішаний (ICMP + TCP)", "mixed")
@@ -385,7 +386,7 @@ class MainWindow(QMainWindow):
     def _parse_ports_input(self) -> list[int] | None:
         raw = self.ports_input.text().strip()
         if not raw:
-            return [22, 80, 443, 3389, 445]
+            return list(DEFAULT_TCP_PORTS)
 
         try:
             ports = []
@@ -657,26 +658,18 @@ class MainWindow(QMainWindow):
 
             level_item = QTableWidgetItem(item.get("attention_level", "Low"))
             level_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            level_text = item.get("attention_level", "Low")
-            if level_text == "Moderate":
-                level_item.setBackground(Qt.yellow)
-            elif level_text == "Elevated":
-                level_item.setBackground(Qt.darkYellow)
-            elif level_text == "High":
-                level_item.setBackground(Qt.red)
-            elif level_text == "Critical":
-                level_item.setBackground(Qt.darkRed)
-                level_item.setForeground(Qt.white)
 
             reasons_text = "; ".join(item.get("reasons", []))
             reasons_item = QTableWidgetItem(reasons_text)
             reasons_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
 
             self.scores_table.setItem(row, 0, ip_item)
+            score_item.setData(Qt.DisplayRole, score)
             self.scores_table.setItem(row, 1, score_item)
             self.scores_table.setItem(row, 2, level_item)
             self.scores_table.setItem(row, 3, reasons_item)
         self.scores_table.setSortingEnabled(True)
+        self.scores_table.sortItems(1, Qt.DescendingOrder)
 
         attention_total = calculate_scan_attention_total(saved_scores)
         summary_text = build_scan_summary(

@@ -5,24 +5,13 @@ import subprocess         # для запуску системної коман�
 import socket             # для перевірки TCP-портів
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from oui_data import OUI_VENDORS
+from ports_data import DEFAULT_TCP_PORTS, PORT_SERVICE_LABELS
 
 # Типові порти, які будемо перевіряти на кожному живому хості
-DEFAULT_PORTS = [22, 80, 443, 3389, 445]
+DEFAULT_PORTS = DEFAULT_TCP_PORTS
 DEFAULT_DISCOVERY_MODE = "mixed"
 DEFAULT_MAX_WORKERS = 64
-
-# Дуже компактний локальний словник OUI (best-effort).
-# Це не повна база виробників, лише демонстраційний набір для дипломного прототипу.
-OUI_VENDORS = {
-    "00:1A:2B": "Cisco",
-    "00:1B:63": "Apple",
-    "00:1C:42": "Parallels",
-    "00:1D:D8": "Microsoft",
-    "00:50:56": "VMware",
-    "08:00:27": "Oracle VirtualBox",
-    "3C:5A:B4": "Google",
-    "B8:27:EB": "Raspberry Pi Foundation",
-}
 
 
 def ping_host(ip: str, timeout_sec: float = 0.3) -> bool:
@@ -146,25 +135,9 @@ def classify_host(open_ports: list[int]) -> str:
     ports_set = set(open_ports)
     labels: list[str] = []
 
-    port_labels = [
-        (80, "web-сервер"),
-        (443, "web-сервер"),
-        (22, "SSH-доступ"),
-        (3389, "RDP (віддалений доступ)"),
-        (445, "SMB / file-sharing"),
-        (21, "FTP"),
-        (25, "SMTP"),
-        (53, "DNS"),
-        (110, "POP3"),
-        (143, "IMAP"),
-        (139, "NetBIOS"),
-        (8080, "web-сервіс (альтернативний порт)"),
-        (3306, "MySQL"),
-        (5432, "PostgreSQL"),
-    ]
-
-    for port, label in port_labels:
-        if port in ports_set and label not in labels:
+    for port in sorted(ports_set):
+        label = PORT_SERVICE_LABELS.get(port)
+        if label and label not in labels:
             labels.append(label)
 
     if not labels:
