@@ -5,7 +5,7 @@ from typing import Callable
 
 # Файл бази даних буде лежати поруч з .py-файлами
 DB_PATH = Path(__file__).with_name("scanner.db")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _get_connection():
@@ -111,8 +111,131 @@ def _migration_001_initial_schema(cur):
     )
 
 
+def _table_exists(cur, table_name: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?;
+        """,
+        (table_name,),
+    )
+    return cur.fetchone() is not None
+
+
+def _get_table_columns(cur, table_name: str) -> set[str]:
+    """
+    Повертає множину назв колонок таблиці.
+    Якщо таблиці не існує, повертає порожню множину.
+    """
+    if not _table_exists(cur, table_name):
+        return set()
+
+    cur.execute(f"PRAGMA table_info({table_name});")
+    return {row[1] for row in cur.fetchall()}
+
+
+def _ensure_column(
+    cur,
+    *,
+    table_name: str,
+    column_name: str,
+    column_def: str,
+):
+    """
+    Додає колонку через ALTER TABLE лише якщо її не існує.
+    Це робить міграцію безпечною та ідемпотентною.
+    """
+    columns = _get_table_columns(cur, table_name)
+    if column_name not in columns:
+        cur.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def};"
+        )
+
+
+def _migration_002_legacy_columns(cur):
+    """
+    Додає відсутні колонки у legacy-БД, створених до системи міграцій.
+    Важливо: не видаляє/не пересоздає таблиці, щоб зберегти існуючі дані.
+    """
+    # Для save_scan() критично потрібні поля в scans.
+    if _table_exists(cur, "scans"):
+        _ensure_column(
+            cur,
+            table_name="scans",
+            column_name="duration_sec",
+            column_def="INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            cur,
+            table_name="scans",
+            column_name="host_count",
+            column_def="INTEGER NOT NULL DEFAULT 0",
+        )
+
+    # Для поточної логіки _upsert_device() та save_scan()
+    # перевіряємо базові поля в devices/hosts.
+    if _table_exists(cur, "devices"):
+        _ensure_column(
+            cur,
+            table_name="devices",
+            column_name="hostname",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            cur,
+            table_name="devices",
+            column_name="last_role",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            cur,
+            table_name="devices",
+            column_name="last_open_ports",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+
+    if _table_exists(cur, "hosts"):
+        _ensure_column(
+            cur,
+            table_name="hosts",
+            column_name="hostname",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            cur,
+            table_name="hosts",
+            column_name="open_ports",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            cur,
+            table_name="hosts",
+            column_name="role",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+
+
+def inspect_schema_state() -> dict[str, list[str]]:
+    """
+    Невеликий допоміжний інструмент для дебагу міграцій.
+    Повертає поточний стан колонок ключових таблиць.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        tables = ["meta", "devices", "scans", "hosts"]
+        return {
+            table: sorted(_get_table_columns(cur, table))
+            for table in tables
+        }
+    finally:
+        conn.close()
+
+
 MIGRATIONS: dict[int, Callable] = {
     1: _migration_001_initial_schema,
+    2: _migration_002_legacy_columns,
 }
 
 
