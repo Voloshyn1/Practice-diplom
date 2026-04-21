@@ -16,24 +16,6 @@ def _get_connection():
     return conn
 
 
-# Проста мапа: номер порту -> назва сервісу (для таблиці services)
-_PORT_SERVICE_MAP = {
-    22: "SSH",
-    80: "HTTP",
-    443: "HTTPS",
-    445: "SMB",
-    3389: "RDP",
-}
-
-
-def _guess_service(port: int) -> str:
-    """
-    Повертає назву сервісу для типових портів.
-    Якщо порт невідомий – повертає 'невідомий сервіс'.
-    """
-    return _PORT_SERVICE_MAP.get(port, "невідомий сервіс")
-
-
 def init_db():
     """
     Створює файл бази даних і таблиці, якщо їх ще немає.
@@ -41,6 +23,21 @@ def init_db():
     """
     conn = _get_connection()
     cur = conn.cursor()
+
+    # Довідник пристроїв (інвентар мережі)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL UNIQUE,
+            hostname TEXT NOT NULL DEFAULT '',
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            last_role TEXT NOT NULL DEFAULT '',
+            last_open_ports TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
 
     # Таблиця сканувань
     cur.execute(
@@ -56,38 +53,72 @@ def init_db():
         """
     )
 
-    # Таблиця активних хостів для кожного сканування
+    # Таблиця хостів для кожного сканування
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS hosts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             scan_id INTEGER NOT NULL,
+            device_id INTEGER NOT NULL,
             ip TEXT NOT NULL,
             hostname TEXT NOT NULL DEFAULT '',
             open_ports TEXT NOT NULL DEFAULT '',
             role TEXT NOT NULL DEFAULT '',
-            FOREIGN KEY (scan_id) REFERENCES scans (id) ON DELETE CASCADE
-        );
-        """
-    )
-
-    # НОВА таблиця сервісів (портів) для кожного хоста
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            host_id INTEGER NOT NULL,
-            port INTEGER NOT NULL,
-            protocol TEXT NOT NULL DEFAULT 'tcp',
-            service TEXT NOT NULL DEFAULT '',
-            state TEXT NOT NULL DEFAULT 'open',
-            FOREIGN KEY (host_id) REFERENCES hosts (id) ON DELETE CASCADE
+            FOREIGN KEY (scan_id) REFERENCES scans (id) ON DELETE CASCADE,
+            FOREIGN KEY (device_id) REFERENCES devices (id) ON DELETE CASCADE
         );
         """
     )
 
     conn.commit()
     conn.close()
+
+
+def _upsert_device(
+    cur,
+    *,
+    ip: str,
+    hostname: str,
+    role: str,
+    open_ports_str: str,
+    seen_at: datetime,
+) -> int:
+    """
+    Додає пристрій у devices або оновлює існуючий.
+    Повертає id пристрою (device_id).
+    """
+    cur.execute("SELECT id, first_seen FROM devices WHERE ip = ?;", (ip,))
+    row = cur.fetchone()
+
+    seen_iso = seen_at.isoformat()
+
+    if row:
+        device_id, first_seen = row
+        # Оновлюємо останню інформацію
+        cur.execute(
+            """
+            UPDATE devices
+            SET hostname = ?,
+                last_seen = ?,
+                last_role = ?,
+                last_open_ports = ?
+            WHERE id = ?;
+            """,
+            (hostname, seen_iso, role, open_ports_str, device_id),
+        )
+        return device_id
+    else:
+        # Новий пристрій у мережі
+        cur.execute(
+            """
+            INSERT INTO devices (
+                ip, hostname, first_seen, last_seen, last_role, last_open_ports
+            )
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            (ip, hostname, seen_iso, seen_iso, role, open_ports_str),
+        )
+        return cur.lastrowid
 
 
 def save_scan(
@@ -99,8 +130,8 @@ def save_scan(
     """
     Зберігає одне сканування у базу:
       - запис у scans
-      - список IP + відкриті порти + роль у hosts
-      - детальну інформацію про кожен порт у services
+      - список хостів у hosts
+      - оновлює інвентар пристроїв у devices
 
     hosts – список словників:
         {
@@ -134,7 +165,7 @@ def save_scan(
     )
     scan_id = cur.lastrowid
 
-    # 2. Додаємо всі знайдені хости + сервіси для кожного хоста
+    # 2. Додаємо всі знайдені хости + оновлюємо devices
     for host in hosts:
         ip = host.get("ip", "")
         ports = host.get("open_ports", [])
@@ -143,32 +174,24 @@ def save_scan(
 
         ports_str = ",".join(str(p) for p in ports) if ports else ""
 
-        # Запис у таблицю hosts
+        # Оновлюємо / додаємо пристрій, отримуємо device_id
+        device_id = _upsert_device(
+            cur,
+            ip=ip,
+            hostname=hostname,
+            role=role,
+            open_ports_str=ports_str,
+            seen_at=finished_at,
+        )
+
+        # Запис у таблицю hosts (конкретний результат цього скану)
         cur.execute(
             """
-            INSERT INTO hosts (scan_id, ip, hostname, open_ports, role)
-            VALUES (?, ?, ?, ?, ?);
+            INSERT INTO hosts (scan_id, device_id, ip, hostname, open_ports, role)
+            VALUES (?, ?, ?, ?, ?, ?);
             """,
-            (scan_id, ip, hostname, ports_str, role),
+            (scan_id, device_id, ip, hostname, ports_str, role),
         )
-        host_id = cur.lastrowid
-
-        # Записи у таблицю services (по одному рядку на кожен порт)
-        for port in ports:
-            try:
-                port_int = int(port)
-            except (TypeError, ValueError):
-                continue
-
-            service_name = _guess_service(port_int)
-
-            cur.execute(
-                """
-                INSERT INTO services (host_id, port, protocol, service, state)
-                VALUES (?, ?, ?, ?, ?);
-                """,
-                (host_id, port_int, "tcp", service_name, "open"),
-            )
 
     conn.commit()
     conn.close()

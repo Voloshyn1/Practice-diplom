@@ -71,20 +71,6 @@ def classify_host(open_ports: list[int]) -> str:
 
 
 def scan_network(network_cidr: str, ports=None, progress_cb=None) -> list[dict]:
-    """
-    Сканує підмережу (наприклад, '192.168.0.0/24').
-
-    Повертає список словників:
-      {
-        "ip": "192.168.0.10",
-        "open_ports": [80, 443],
-        "role": "web-сервер"
-      }
-
-    Якщо передано progress_cb, то на кожній адресі викликає:
-        progress_cb(current, total, host_info)
-    де host_info = dict(...) для живого хоста або None, якщо пінг не відповів.
-    """
     network = ipaddress.ip_network(network_cidr, strict=False)
     alive_hosts: list[dict] = []
 
