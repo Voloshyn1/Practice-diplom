@@ -5,7 +5,7 @@ from typing import Callable
 
 # Файл бази даних буде лежати поруч з .py-файлами
 DB_PATH = Path(__file__).with_name("scanner.db")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _get_connection():
@@ -243,6 +243,48 @@ def _migration_003_events_schema(cur):
     )
 
 
+def _migration_004_attention_schema(cur):
+    """
+    Додає структури для оцінки уваги та текстового підсумку сканування.
+    """
+    # Додаємо поля у scans (потрібні для підсумку та агрегованої оцінки уваги)
+    if _table_exists(cur, "scans"):
+        _ensure_column(
+            cur,
+            table_name="scans",
+            column_name="summary_text",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            cur,
+            table_name="scans",
+            column_name="attention_score_total",
+            column_def="INTEGER NOT NULL DEFAULT 0",
+        )
+
+    # Таблиця оцінок уваги по хостах у межах одного сканування
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS device_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id INTEGER NOT NULL,
+            ip TEXT NOT NULL,
+            attention_score INTEGER NOT NULL,
+            attention_level TEXT NOT NULL,
+            reasons TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE CASCADE
+        );
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_scores_scan_id ON device_scores(scan_id);"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_scores_ip ON device_scores(ip);"
+    )
+
+
 def inspect_schema_state() -> dict[str, list[str]]:
     """
     Невеликий допоміжний інструмент для дебагу міграцій.
@@ -251,7 +293,7 @@ def inspect_schema_state() -> dict[str, list[str]]:
     conn = _get_connection()
     try:
         cur = conn.cursor()
-        tables = ["meta", "devices", "scans", "hosts", "events"]
+        tables = ["meta", "devices", "scans", "hosts", "events", "device_scores"]
         return {
             table: sorted(_get_table_columns(cur, table))
             for table in tables
@@ -264,6 +306,7 @@ MIGRATIONS: dict[int, Callable] = {
     1: _migration_001_initial_schema,
     2: _migration_002_legacy_columns,
     3: _migration_003_events_schema,
+    4: _migration_004_attention_schema,
 }
 
 
@@ -559,3 +602,113 @@ def load_events_for_latest_scan(network: str) -> list[dict]:
         conn.close()
 
     return load_events_for_scan(latest_scan_id)
+
+
+def save_device_scores(scan_id: int, scores: list[dict]):
+    """
+    Зберігає оцінки уваги по хостах для конкретного сканування.
+    """
+    conn = _get_connection()
+    try:
+        with conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM device_scores WHERE scan_id = ?;", (scan_id,))
+            for score_item in scores:
+                reasons_list = score_item.get("reasons", [])
+                reasons_text = " | ".join(reasons_list) if reasons_list else ""
+                cur.execute(
+                    """
+                    INSERT INTO device_scores (
+                        scan_id, ip, attention_score, attention_level, reasons, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        scan_id,
+                        score_item.get("ip", ""),
+                        int(score_item.get("attention_score", 0)),
+                        score_item.get("attention_level", "Low"),
+                        reasons_text,
+                        datetime.now().isoformat(),
+                    ),
+                )
+    finally:
+        conn.close()
+
+
+def load_device_scores_for_scan(scan_id: int) -> list[dict]:
+    """
+    Завантажує оцінки уваги по хостах для конкретного сканування.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT ip, attention_score, attention_level, reasons
+            FROM device_scores
+            WHERE scan_id = ?
+            ORDER BY attention_score DESC, ip ASC;
+            """,
+            (scan_id,),
+        )
+        rows = cur.fetchall()
+        result: list[dict] = []
+        for ip, score, level, reasons_text in rows:
+            reasons = [r.strip() for r in reasons_text.split("|") if r.strip()] if reasons_text else []
+            result.append({
+                "ip": ip,
+                "attention_score": score,
+                "attention_level": level,
+                "reasons": reasons,
+            })
+        return result
+    finally:
+        conn.close()
+
+
+def save_scan_summary(scan_id: int, summary_text: str, attention_score_total: int):
+    """
+    Зберігає текст підсумку і загальну оцінку уваги для сканування.
+    """
+    conn = _get_connection()
+    try:
+        with conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE scans
+                SET summary_text = ?,
+                    attention_score_total = ?
+                WHERE id = ?;
+                """,
+                (summary_text, int(attention_score_total), scan_id),
+            )
+    finally:
+        conn.close()
+
+
+def load_summary_for_scan(scan_id: int) -> dict:
+    """
+    Завантажує збережений підсумок сканування.
+    """
+    conn = _get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT summary_text, attention_score_total
+            FROM scans
+            WHERE id = ?;
+            """,
+            (scan_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"summary_text": "", "attention_score_total": 0}
+        return {
+            "summary_text": row[0] or "",
+            "attention_score_total": int(row[1] or 0),
+        }
+    finally:
+        conn.close()

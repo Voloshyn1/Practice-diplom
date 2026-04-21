@@ -19,13 +19,19 @@ from PySide6.QtWidgets import (
 )
 
 from analyzer import compare_scans, get_previous_scan_data
+from report import build_scan_summary
+from risk import calculate_host_scores, calculate_scan_attention_total, derive_attention_level
 from scanner import scan_network
 from storage import (
     init_db,
+    load_device_scores_for_scan,
     load_events_for_scan,
     load_hosts_for_scan,
+    load_summary_for_scan,
+    save_device_scores,
     save_events,
     save_scan,
+    save_scan_summary,
 )
 
 
@@ -119,6 +125,28 @@ class MainWindow(QMainWindow):
         self.changes_status_label.setAlignment(Qt.AlignLeft)
         main_layout.addWidget(self.changes_status_label)
 
+        self.scores_title_label = QLabel("Рівень уваги по хостах:")
+        main_layout.addWidget(self.scores_title_label)
+
+        self.scores_table = QTableWidget()
+        self.scores_table.setColumnCount(4)
+        self.scores_table.setHorizontalHeaderLabels([
+            "IP",
+            "Оцінка уваги",
+            "Рівень уваги",
+            "Причини",
+        ])
+        self.scores_table.horizontalHeader().setStretchLastSection(True)
+        main_layout.addWidget(self.scores_table)
+
+        self.summary_title_label = QLabel("Підсумок сканування:")
+        main_layout.addWidget(self.summary_title_label)
+
+        self.summary_text_label = QLabel("")
+        self.summary_text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.summary_text_label.setWordWrap(True)
+        main_layout.addWidget(self.summary_text_label)
+
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
@@ -167,6 +195,8 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.changes_table.setRowCount(0)
         self.changes_status_label.setText("")
+        self.scores_table.setRowCount(0)
+        self.summary_text_label.setText("")
         self.scan_id_label.setText("")
 
         # Скидаємо прогрес-бар
@@ -319,42 +349,89 @@ class MainWindow(QMainWindow):
         """
         Аналізує зміни між поточним і попереднім скануванням.
         """
+        current_hosts = load_hosts_for_scan(current_scan_id)
         previous_scan_id, previous_hosts = get_previous_scan_data(network, current_scan_id)
+
+        has_previous_scan = previous_scan_id is not None
         if previous_scan_id is None:
             self.changes_table.setRowCount(0)
             self.changes_status_label.setText(
                 "Попереднього сканування для порівняння не знайдено."
             )
-            return
+            events = []
+        else:
+            events = compare_scans(previous_hosts, current_hosts)
 
-        current_hosts = load_hosts_for_scan(current_scan_id)
-        events = compare_scans(previous_hosts, current_hosts)
         save_events(current_scan_id, events)
 
         saved_events = load_events_for_scan(current_scan_id)
-        if not saved_events:
+        if previous_scan_id is not None and not saved_events:
             self.changes_table.setRowCount(0)
             self.changes_status_label.setText(
                 "Змін порівняно з попереднім скануванням не виявлено."
             )
-            return
+        elif saved_events:
+            self.changes_status_label.setText(
+                f"Виявлено змін: {len(saved_events)}"
+            )
+            self.changes_table.setRowCount(len(saved_events))
 
-        self.changes_status_label.setText(
-            f"Виявлено змін: {len(saved_events)}"
+            for row, event in enumerate(saved_events):
+                event_type = event.get("event_type", "")
+                description = event.get("description", "")
+
+                type_item = QTableWidgetItem(event_type)
+                type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                description_item = QTableWidgetItem(description)
+                description_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+                self.changes_table.setItem(row, 0, type_item)
+                self.changes_table.setItem(row, 1, description_item)
+
+        # Рахуємо і зберігаємо оцінки уваги
+        host_scores = calculate_host_scores(saved_events)
+        save_device_scores(current_scan_id, host_scores)
+        saved_scores = load_device_scores_for_scan(current_scan_id)
+
+        self.scores_table.setRowCount(len(saved_scores))
+        for row, item in enumerate(saved_scores):
+            ip_item = QTableWidgetItem(item.get("ip", ""))
+            ip_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+            score = int(item.get("attention_score", 0))
+            score_item = QTableWidgetItem(str(score))
+            score_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+            level_item = QTableWidgetItem(item.get("attention_level", "Low"))
+            level_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+            reasons_text = "; ".join(item.get("reasons", []))
+            reasons_item = QTableWidgetItem(reasons_text)
+            reasons_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+            self.scores_table.setItem(row, 0, ip_item)
+            self.scores_table.setItem(row, 1, score_item)
+            self.scores_table.setItem(row, 2, level_item)
+            self.scores_table.setItem(row, 3, reasons_item)
+
+        attention_total = calculate_scan_attention_total(saved_scores)
+        summary_text = build_scan_summary(
+            network=network,
+            active_host_count=len(current_hosts),
+            events=saved_events,
+            host_scores=saved_scores,
+            has_previous_scan=has_previous_scan,
         )
-        self.changes_table.setRowCount(len(saved_events))
+        save_scan_summary(current_scan_id, summary_text, attention_total)
+        stored_summary = load_summary_for_scan(current_scan_id)
 
-        for row, event in enumerate(saved_events):
-            event_type = event.get("event_type", "")
-            description = event.get("description", "")
-
-            type_item = QTableWidgetItem(event_type)
-            type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            description_item = QTableWidgetItem(description)
-            description_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-
-            self.changes_table.setItem(row, 0, type_item)
-            self.changes_table.setItem(row, 1, description_item)
+        total_score = stored_summary.get("attention_score_total", 0)
+        total_level = derive_attention_level(int(total_score))
+        visible_summary = (
+            f"Загальна оцінка уваги: {total_score} ({total_level})\n\n"
+            f"{stored_summary.get('summary_text', '')}"
+        )
+        self.summary_text_label.setText(visible_summary)
 
     def on_scan_error(self, message: str):
         """
