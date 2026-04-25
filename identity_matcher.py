@@ -155,12 +155,14 @@ def score_host_pair(prev: dict, cur: dict) -> dict:
     prev_ip = (prev.get("ip") or "").strip()
     cur_ip = (cur.get("ip") or "").strip()
 
-    if (
+    strong_mac_conflict = (
         prev_ip and cur_ip and prev_ip == cur_ip and
         prev_mac and cur_mac and prev_mac != cur_mac and
         not is_locally_administered_mac(prev_mac) and
         not is_locally_administered_mac(cur_mac)
-    ):
+    )
+
+    if strong_mac_conflict:
         score -= 20
         penalties.append("IP збігається, але MAC різний (можливе перевикористання IP)")
 
@@ -168,6 +170,27 @@ def score_host_pair(prev: dict, cur: dict) -> dict:
         if host_evidence < 0.30 and port_evidence < 0.20:
             score -= 8
             penalties.append("MAC збіг без підтримки hostname/портів")
+
+    # Пост-правила для кейсів без MAC, коли інші стабільні ознаки узгоджені.
+    if (
+        prev_ip and cur_ip and prev_ip == cur_ip and
+        not strong_mac_conflict and
+        host_evidence >= 0.90 and
+        port_evidence >= 0.80 and
+        role_evidence >= 0.80
+    ):
+        if score < 75:
+            score = 75
+        reasons.append("Exact IP with matching hostname, ports, and role despite missing MAC")
+    elif (
+        prev_ip and cur_ip and prev_ip == cur_ip and
+        not strong_mac_conflict and
+        host_evidence >= 0.90 and
+        (port_evidence >= 0.50 or role_evidence >= 0.50)
+    ):
+        if score < 65:
+            score = 65
+        reasons.append("Exact IP with supporting hostname/service evidence")
 
     score = max(0, min(100, score))
 
@@ -234,6 +257,7 @@ def match_hosts(previous_hosts: list[dict], current_hosts: list[dict]) -> dict:
             used_cur.add(pair["cur_idx"])
 
     ambiguous: list[dict] = []
+    ambiguous_prev_idx: set[int] = set()
     for cur_idx, cur in enumerate(current_hosts):
         if cur_idx in used_cur:
             continue
@@ -245,6 +269,8 @@ def match_hosts(previous_hosts: list[dict], current_hosts: list[dict]) -> dict:
         ]
         if candidates:
             candidates.sort(key=lambda x: -x["score"])
+            for cand in candidates:
+                ambiguous_prev_idx.add(cand["prev_idx"])
             ambiguous.append({
                 "cur": cur,
                 "candidates": [
@@ -259,7 +285,8 @@ def match_hosts(previous_hosts: list[dict], current_hosts: list[dict]) -> dict:
 
     ambiguous_cur_ids = {id(item["cur"]) for item in ambiguous}
     unmatched_previous = [
-        host for idx, host in enumerate(previous_hosts) if idx not in used_prev
+        host for idx, host in enumerate(previous_hosts)
+        if idx not in used_prev and idx not in ambiguous_prev_idx
     ]
     unmatched_current = [
         host for idx, host in enumerate(current_hosts)

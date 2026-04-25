@@ -61,6 +61,19 @@ class IdentityMatcherTests(unittest.TestCase):
         scored = score_host_pair(prev, cur)
         self.assertIn(scored['decision'], {'probable-link', 'ambiguous', 'no-link'})
 
+    def test_same_ip_hostname_ports_role_without_mac_is_probable_link(self):
+        prev = {
+            'ip': '192.168.0.152', 'hostname': 'Voloshyn', 'mac': '',
+            'vendor': '', 'open_ports': [139, 445], 'role': 'NetBIOS, SMB / file-sharing'
+        }
+        cur = {
+            'ip': '192.168.0.152', 'hostname': 'Voloshyn', 'mac': '',
+            'vendor': '', 'open_ports': [139, 445], 'role': 'NetBIOS, SMB / file-sharing'
+        }
+        scored = score_host_pair(prev, cur)
+        self.assertGreaterEqual(scored['score'], 70)
+        self.assertIn(scored['decision'], {'probable-link', 'auto-link'})
+
     def test_completely_different_hosts_no_link(self):
         prev = {
             'ip': '192.168.0.10', 'hostname': 'db', 'mac': '00:11:22:33:44:55',
@@ -72,6 +85,19 @@ class IdentityMatcherTests(unittest.TestCase):
         }
         scored = score_host_pair(prev, cur)
         self.assertEqual(scored['decision'], 'no-link')
+
+    def test_same_ip_with_strong_mac_conflict_does_not_get_exact_ip_boost(self):
+        prev = {
+            'ip': '192.168.0.152', 'hostname': 'Voloshyn', 'mac': '00:11:22:33:44:55',
+            'vendor': 'Intel', 'open_ports': [139, 445], 'role': 'NetBIOS, SMB / file-sharing'
+        }
+        cur = {
+            'ip': '192.168.0.152', 'hostname': 'Voloshyn', 'mac': '10:11:22:33:44:55',
+            'vendor': 'Intel', 'open_ports': [139, 445], 'role': 'NetBIOS, SMB / file-sharing'
+        }
+        scored = score_host_pair(prev, cur)
+        self.assertNotEqual(scored['decision'], 'auto-link')
+        self.assertTrue(any('перевикористання IP' in p for p in scored['penalties']))
 
     def test_one_previous_host_not_linked_twice(self):
         prev_hosts = [
@@ -95,6 +121,20 @@ class IdentityMatcherTests(unittest.TestCase):
         event_types = {e['event_type'] for e in events}
         self.assertIn('HOST_IP_CHANGED', event_types)
         self.assertIn('NEW_PORT_OPENED', event_types)
+
+    def test_compare_scans_does_not_create_new_and_disappeared_for_same_ip_without_mac(self):
+        previous_hosts = [
+            {'ip': '192.168.0.152', 'hostname': 'Voloshyn', 'mac': '', 'vendor': '', 'open_ports': [139, 445], 'role': 'NetBIOS, SMB / file-sharing'}
+        ]
+        current_hosts = [
+            {'ip': '192.168.0.152', 'hostname': 'Voloshyn', 'mac': '', 'vendor': '', 'open_ports': [139, 445], 'role': 'NetBIOS, SMB / file-sharing'}
+        ]
+        events = compare_scans(previous_hosts, current_hosts)
+        bad_events = [
+            e for e in events
+            if e.get('ip') == '192.168.0.152' and e.get('event_type') in {'NEW_HOST', 'HOST_DISAPPEARED'}
+        ]
+        self.assertEqual(bad_events, [])
 
 
 if __name__ == '__main__':
