@@ -3,6 +3,7 @@ import unittest
 from analyzer import compare_scans
 from identity_matcher import (
     is_locally_administered_mac,
+    hostname_similarity,
     jaccard_similarity,
     match_hosts,
     normalize_hostname,
@@ -20,6 +21,11 @@ class IdentityMatcherTests(unittest.TestCase):
     def test_normalize_hostname(self):
         self.assertEqual(normalize_hostname(' Host-A.Office.Local '), 'host-a')
         self.assertEqual(normalize_hostname(''), '')
+
+    def test_hostname_similarity(self):
+        self.assertEqual(hostname_similarity('Host-A.local', 'host-a'), 1.0)
+        self.assertGreater(hostname_similarity('workstation-01', 'workstation-1'), 0.8)
+        self.assertEqual(hostname_similarity('', 'workstation-1'), 0.0)
 
     def test_jaccard_both_empty_is_zero(self):
         self.assertEqual(jaccard_similarity([], []), 0.0)
@@ -73,6 +79,10 @@ class IdentityMatcherTests(unittest.TestCase):
         scored = score_host_pair(prev, cur)
         self.assertGreaterEqual(scored['score'], 70)
         self.assertIn(scored['decision'], {'probable-link', 'auto-link'})
+        self.assertIn(
+            'IP збігається, hostname, порти та роль підтверджують схожість без MAC',
+            scored['reasons'],
+        )
 
     def test_completely_different_hosts_no_link(self):
         prev = {
@@ -121,6 +131,8 @@ class IdentityMatcherTests(unittest.TestCase):
         event_types = {e['event_type'] for e in events}
         self.assertIn('HOST_IP_CHANGED', event_types)
         self.assertIn('NEW_PORT_OPENED', event_types)
+        self.assertTrue(all('identity confidence' not in e.get('description', '') for e in events))
+        self.assertTrue(all('decision:' not in e.get('description', '') for e in events))
 
     def test_compare_scans_does_not_create_new_and_disappeared_for_same_ip_without_mac(self):
         previous_hosts = [

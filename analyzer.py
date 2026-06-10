@@ -40,10 +40,7 @@ def compare_scans(previous_hosts: list[dict], current_hosts: list[dict]) -> list
                 "event_type": "HOST_IP_CHANGED",
                 "old_value": prev_ip,
                 "new_value": cur_ip,
-                "description": (
-                    f"Пристрій змінив IP-адресу: {prev_ip} -> {cur_ip} "
-                    f"(identity confidence: {score}, decision: {decision})"
-                ),
+                "description": f"Пристрій змінив IP-адресу: {prev_ip} -> {cur_ip}",
                 "match_confidence": score,
                 "match_decision": decision,
                 "match_reasons": reasons,
@@ -57,10 +54,7 @@ def compare_scans(previous_hosts: list[dict], current_hosts: list[dict]) -> list
                 "event_type": "NEW_PORT_OPENED",
                 "old_value": "",
                 "new_value": str(port),
-                "description": (
-                    f"На хості {event_ip} відкрився порт {port} "
-                    f"(identity confidence: {score}, decision: {decision})"
-                ),
+                "description": f"На хості {event_ip} відкрився порт {port}",
                 "match_confidence": score,
                 "match_decision": decision,
                 "match_reasons": reasons,
@@ -71,10 +65,7 @@ def compare_scans(previous_hosts: list[dict], current_hosts: list[dict]) -> list
                 "event_type": "PORT_CLOSED",
                 "old_value": str(port),
                 "new_value": "",
-                "description": (
-                    f"На хості {event_ip} закрився порт {port} "
-                    f"(identity confidence: {score}, decision: {decision})"
-                ),
+                "description": f"На хості {event_ip} закрився порт {port}",
                 "match_confidence": score,
                 "match_decision": decision,
                 "match_reasons": reasons,
@@ -88,10 +79,7 @@ def compare_scans(previous_hosts: list[dict], current_hosts: list[dict]) -> list
                 "event_type": "ROLE_CHANGED",
                 "old_value": prev_role,
                 "new_value": cur_role,
-                "description": (
-                    f"На хості {event_ip} змінилася роль: {prev_role} -> {cur_role} "
-                    f"(identity confidence: {score}, decision: {decision})"
-                ),
+                "description": f"На хості {event_ip} змінилася роль: {prev_role} -> {cur_role}",
                 "match_confidence": score,
                 "match_decision": decision,
                 "match_reasons": reasons,

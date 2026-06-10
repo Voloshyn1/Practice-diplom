@@ -181,7 +181,7 @@ def score_host_pair(prev: dict, cur: dict) -> dict:
     ):
         if score < 75:
             score = 75
-        reasons.append("Exact IP with matching hostname, ports, and role despite missing MAC")
+        reasons.append("IP збігається, hostname, порти та роль підтверджують схожість без MAC")
     elif (
         prev_ip and cur_ip and prev_ip == cur_ip and
         not strong_mac_conflict and
@@ -190,7 +190,7 @@ def score_host_pair(prev: dict, cur: dict) -> dict:
     ):
         if score < 65:
             score = 65
-        reasons.append("Exact IP with supporting hostname/service evidence")
+        reasons.append("IP збігається і є додаткові ознаки hostname/сервісів")
 
     score = max(0, min(100, score))
 
