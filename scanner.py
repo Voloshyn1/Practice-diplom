@@ -5,7 +5,7 @@ import subprocess         # для запуску системної коман�
 import socket             # для перевірки TCP-портів
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from oui_data import OUI_VENDORS
+from oui_data import lookup_vendor_by_mac
 from ports_data import DEFAULT_TCP_PORTS, PORT_SERVICE_LABELS
 
 # Типові порти, які будемо перевіряти на кожному живому хості
@@ -118,10 +118,7 @@ def get_vendor_from_mac(mac: str) -> str:
     """
     Best-effort визначення виробника з OUI (локально, без зовнішніх API).
     """
-    if not mac:
-        return ""
-    prefix = _normalize_mac(mac)[:8]
-    return OUI_VENDORS.get(prefix, "Unknown")
+    return lookup_vendor_by_mac(mac)
 
 
 def classify_host(open_ports: list[int]) -> str:

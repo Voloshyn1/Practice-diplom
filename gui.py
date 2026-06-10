@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QComboBox,
+    QHeaderView,
 )
 
 from analyzer import compare_scans, get_previous_scan_data
@@ -26,6 +27,36 @@ from report import build_scan_summary
 from risk import calculate_host_scores, calculate_scan_attention_total, derive_attention_level
 from scanner import scan_network
 from ports_data import DEFAULT_TCP_PORTS
+
+
+def _confidence_text(event: dict) -> str:
+    confidence = event.get("match_confidence", -1)
+    return str(confidence) if confidence >= 0 else "—"
+
+
+def _decision_text(event: dict) -> str:
+    return event.get("match_decision") or "—"
+
+
+def _configure_event_table_columns(
+    table: QTableWidget,
+    *,
+    type_column: int,
+    description_column: int,
+    confidence_column: int,
+    decision_column: int,
+):
+    """Keep event descriptions readable while identity metadata columns stay compact."""
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(description_column, QHeaderView.Stretch)
+    header.setSectionResizeMode(type_column, QHeaderView.Fixed)
+    header.setSectionResizeMode(confidence_column, QHeaderView.Fixed)
+    header.setSectionResizeMode(decision_column, QHeaderView.Fixed)
+    table.setColumnWidth(type_column, 160)
+    table.setColumnWidth(confidence_column, 90)
+    table.setColumnWidth(decision_column, 125)
+
+
 from storage import (
     export_latest_events_csv,
     export_latest_scores_csv,
@@ -84,12 +115,21 @@ class DevicePassportDialog(QDialog):
         events_table = QTableWidget()
         events_table.setColumnCount(6)
         events_table.setHorizontalHeaderLabels(["Час", "Тип", "Опис", "Confidence", "Decision", "Scan ID"])
+        _configure_event_table_columns(
+            events_table,
+            type_column=1,
+            description_column=2,
+            confidence_column=3,
+            decision_column=4,
+        )
+        events_table.setColumnWidth(0, 150)
+        events_table.setColumnWidth(5, 70)
+        events_table.setSortingEnabled(False)
         events = passport.get("recent_events", [])
         events_table.setRowCount(len(events))
         for row, event in enumerate(events):
-            confidence = event.get("match_confidence", -1)
-            confidence_text = str(confidence) if confidence >= 0 else "—"
-            decision_text = event.get("match_decision") or "—"
+            confidence_text = _confidence_text(event)
+            decision_text = _decision_text(event)
             for col, value in enumerate([
                 event.get("created_at", ""),
                 event.get("event_type", ""),
@@ -101,7 +141,7 @@ class DevicePassportDialog(QDialog):
                 item = QTableWidgetItem(value)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 events_table.setItem(row, col, item)
-        events_table.horizontalHeader().setStretchLastSection(True)
+        events_table.setSortingEnabled(True)
         layout.addWidget(events_table)
 
         layout.addWidget(QLabel("Історія появ у скануваннях:"))
@@ -110,6 +150,7 @@ class DevicePassportDialog(QDialog):
         history_table.setHorizontalHeaderLabels(
             ["Scan ID", "Finished", "Role", "Ports", "Total attention", "Network"]
         )
+        history_table.setSortingEnabled(False)
         history = get_device_scan_history(ip)
         history_table.setRowCount(len(history))
         for row, h in enumerate(history):
@@ -148,7 +189,12 @@ class ScanHistoryDialog(QDialog):
             "Attention",
             "Summary preview",
         ])
-        self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.history_table.setColumnWidth(0, 70)
+        self.history_table.setColumnWidth(1, 140)
+        self.history_table.setColumnWidth(2, 150)
+        self.history_table.setColumnWidth(3, 70)
+        self.history_table.setColumnWidth(4, 85)
         self.history_table.setSortingEnabled(True)
         self.history_table.itemSelectionChanged.connect(self._show_selected_scan_details)
         layout.addWidget(self.history_table)
@@ -160,7 +206,13 @@ class ScanHistoryDialog(QDialog):
         self.events_table = QTableWidget()
         self.events_table.setColumnCount(4)
         self.events_table.setHorizontalHeaderLabels(["Тип події", "Опис", "Confidence", "Decision"])
-        self.events_table.horizontalHeader().setStretchLastSection(True)
+        _configure_event_table_columns(
+            self.events_table,
+            type_column=0,
+            description_column=1,
+            confidence_column=2,
+            decision_column=3,
+        )
         self.events_table.setSortingEnabled(True)
         layout.addWidget(self.events_table)
 
@@ -168,6 +220,7 @@ class ScanHistoryDialog(QDialog):
 
     def _populate_history(self):
         scans = get_scan_history(limit=100)
+        self.history_table.setSortingEnabled(False)
         self.history_table.setRowCount(len(scans))
         for row, scan in enumerate(scans):
             values = [
@@ -182,6 +235,7 @@ class ScanHistoryDialog(QDialog):
                 item = QTableWidgetItem(value)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 self.history_table.setItem(row, col, item)
+        self.history_table.setSortingEnabled(True)
 
     def _show_selected_scan_details(self):
         selected = self.history_table.selectedItems()
@@ -196,7 +250,9 @@ class ScanHistoryDialog(QDialog):
         details = get_scan_details(scan_id)
         if not details:
             self.detail_label.setText("Деталі сканування не знайдено.")
+            self.events_table.setSortingEnabled(False)
             self.events_table.setRowCount(0)
+            self.events_table.setSortingEnabled(True)
             return
 
         self.detail_label.setText(
@@ -208,15 +264,15 @@ class ScanHistoryDialog(QDialog):
         )
 
         events = details.get("events", [])
+        self.events_table.setSortingEnabled(False)
         self.events_table.setRowCount(len(events))
         for r, event in enumerate(events):
             type_item = QTableWidgetItem(event.get("event_type", ""))
             type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             desc_item = QTableWidgetItem(event.get("description", ""))
             desc_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            confidence = event.get("match_confidence", -1)
-            confidence_text = str(confidence) if confidence >= 0 else "—"
-            decision_text = event.get("match_decision") or "—"
+            confidence_text = _confidence_text(event)
+            decision_text = _decision_text(event)
             conf_item = QTableWidgetItem(confidence_text)
             conf_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             decision_item = QTableWidgetItem(decision_text)
@@ -225,6 +281,7 @@ class ScanHistoryDialog(QDialog):
             self.events_table.setItem(r, 1, desc_item)
             self.events_table.setItem(r, 2, conf_item)
             self.events_table.setItem(r, 3, decision_item)
+        self.events_table.setSortingEnabled(True)
 
 
 class ScanWorker(QThread):
@@ -264,7 +321,7 @@ class ScanWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Програмний комплекс для активного сканування та аналізу локальної мережі")
+        self.setWindowTitle("Програмний комплекс для активного сканування та аналізу мережевої інфраструктури локальної мережі")
         self.resize(800, 500)
 
         # Ініціалізуємо БД
@@ -322,7 +379,9 @@ class MainWindow(QMainWindow):
             "Відкриті TCP-порти",
             "Тип вузла / сервіси",
         ])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 170)
+        self.table.setColumnWidth(1, 170)
         self.table.cellDoubleClicked.connect(self.on_main_table_double_click)
         self.table.setSortingEnabled(True)
 
@@ -339,7 +398,13 @@ class MainWindow(QMainWindow):
             "Confidence",
             "Decision",
         ])
-        self.changes_table.horizontalHeader().setStretchLastSection(True)
+        _configure_event_table_columns(
+            self.changes_table,
+            type_column=0,
+            description_column=1,
+            confidence_column=2,
+            decision_column=3,
+        )
         self.changes_table.setSortingEnabled(True)
         main_layout.addWidget(self.changes_table)
 
@@ -358,7 +423,10 @@ class MainWindow(QMainWindow):
             "Рівень уваги",
             "Причини",
         ])
-        self.scores_table.horizontalHeader().setStretchLastSection(True)
+        self.scores_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.scores_table.setColumnWidth(0, 150)
+        self.scores_table.setColumnWidth(1, 80)
+        self.scores_table.setColumnWidth(2, 110)
         self.scores_table.cellDoubleClicked.connect(self.on_scores_table_double_click)
         self.scores_table.setSortingEnabled(True)
         main_layout.addWidget(self.scores_table)
@@ -455,7 +523,10 @@ class MainWindow(QMainWindow):
         self._set_scan_controls_enabled(False)
         self.last_progress_total = 0
 
-        # Очищаємо попередню таблицю
+        # Очищаємо попередні таблиці без активного сортування, щоб рядки не змішувалися.
+        self.table.setSortingEnabled(False)
+        self.changes_table.setSortingEnabled(False)
+        self.scores_table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.changes_table.setRowCount(0)
         self.changes_status_label.setText("")
@@ -623,7 +694,9 @@ class MainWindow(QMainWindow):
 
         has_previous_scan = previous_scan_id is not None
         if previous_scan_id is None:
+            self.changes_table.setSortingEnabled(False)
             self.changes_table.setRowCount(0)
+            self.changes_table.setSortingEnabled(True)
             self.changes_status_label.setText(
                 "Попереднього сканування для порівняння не знайдено."
             )
@@ -635,7 +708,9 @@ class MainWindow(QMainWindow):
 
         saved_events = load_events_for_scan(current_scan_id)
         if previous_scan_id is not None and not saved_events:
+            self.changes_table.setSortingEnabled(False)
             self.changes_table.setRowCount(0)
+            self.changes_table.setSortingEnabled(True)
             self.changes_status_label.setText(
                 "Змін порівняно з попереднім скануванням не виявлено."
             )
@@ -643,15 +718,15 @@ class MainWindow(QMainWindow):
             self.changes_status_label.setText(
                 f"Виявлено змін: {len(saved_events)}"
             )
+            self.changes_table.setSortingEnabled(False)
             self.changes_table.setRowCount(len(saved_events))
 
             for row, event in enumerate(saved_events):
                 event_type = event.get("event_type", "")
                 description = event.get("description", "")
 
-                confidence = event.get("match_confidence", -1)
-                confidence_text = str(confidence) if confidence >= 0 else "—"
-                decision_text = event.get("match_decision") or "—"
+                confidence_text = _confidence_text(event)
+                decision_text = _decision_text(event)
 
                 type_item = QTableWidgetItem(event_type)
                 type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
@@ -673,6 +748,7 @@ class MainWindow(QMainWindow):
         save_device_scores(current_scan_id, host_scores)
         saved_scores = load_device_scores_for_scan(current_scan_id)
 
+        self.scores_table.setSortingEnabled(False)
         self.scores_table.setRowCount(len(saved_scores))
         for row, item in enumerate(saved_scores):
             ip_item = QTableWidgetItem(item.get("ip", ""))

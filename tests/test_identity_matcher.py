@@ -137,5 +137,24 @@ class IdentityMatcherTests(unittest.TestCase):
         self.assertEqual(bad_events, [])
 
 
+class AnalyzerLocalizationTests(unittest.TestCase):
+    def test_ambiguous_match_description_is_ukrainian(self):
+        previous = [{
+            'ip': '192.168.0.10', 'hostname': 'printer-office', 'mac': '',
+            'vendor': '', 'open_ports': [80, 443], 'role': 'web-сервер'
+        }]
+        current = [{
+            'ip': '192.168.0.10', 'hostname': 'printer-office', 'mac': '',
+            'vendor': '', 'open_ports': [80], 'role': 'web-сервер'
+        }]
+
+        events = compare_scans(previous, current)
+        ambiguous_events = [e for e in events if e.get('event_type') == 'HOST_AMBIGUOUS_MATCH']
+
+        self.assertTrue(ambiguous_events)
+        self.assertIn('Невизначене зіставлення хоста', ambiguous_events[0]['description'])
+        self.assertIn('Потрібна ручна перевірка', ambiguous_events[0]['description'])
+
+
 if __name__ == '__main__':
     unittest.main()

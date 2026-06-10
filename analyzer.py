@@ -108,8 +108,10 @@ def compare_scans(previous_hosts: list[dict], current_hosts: list[dict]) -> list
             "old_value": prev_ip,
             "new_value": cur_ip,
             "description": (
-                f"Ambiguous identity match for host {cur_ip}: "
-                f"top candidate {prev_ip} score {top['score']}. Manual review required."
+                "Невизначене зіставлення хоста між сканами: "
+                f"поточний хост {cur_ip}, найкращий кандидат з попереднього "
+                f"сканування {prev_ip}, впевненість {top['score']}. "
+                "Потрібна ручна перевірка."
             ),
             "match_confidence": top["score"],
             "match_decision": "ambiguous",
