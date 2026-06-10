@@ -82,15 +82,20 @@ class DevicePassportDialog(QDialog):
 
         layout.addWidget(QLabel("Останні події по хосту:"))
         events_table = QTableWidget()
-        events_table.setColumnCount(4)
-        events_table.setHorizontalHeaderLabels(["Час", "Тип", "Опис", "Scan ID"])
+        events_table.setColumnCount(6)
+        events_table.setHorizontalHeaderLabels(["Час", "Тип", "Опис", "Confidence", "Decision", "Scan ID"])
         events = passport.get("recent_events", [])
         events_table.setRowCount(len(events))
         for row, event in enumerate(events):
+            confidence = event.get("match_confidence", -1)
+            confidence_text = str(confidence) if confidence >= 0 else "—"
+            decision_text = event.get("match_decision") or "—"
             for col, value in enumerate([
                 event.get("created_at", ""),
                 event.get("event_type", ""),
                 event.get("description", ""),
+                confidence_text,
+                decision_text,
                 str(event.get("scan_id", "")),
             ]):
                 item = QTableWidgetItem(value)
@@ -153,8 +158,8 @@ class ScanHistoryDialog(QDialog):
         layout.addWidget(self.detail_label)
 
         self.events_table = QTableWidget()
-        self.events_table.setColumnCount(2)
-        self.events_table.setHorizontalHeaderLabels(["Тип події", "Опис"])
+        self.events_table.setColumnCount(4)
+        self.events_table.setHorizontalHeaderLabels(["Тип події", "Опис", "Confidence", "Decision"])
         self.events_table.horizontalHeader().setStretchLastSection(True)
         self.events_table.setSortingEnabled(True)
         layout.addWidget(self.events_table)
@@ -209,8 +214,17 @@ class ScanHistoryDialog(QDialog):
             type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             desc_item = QTableWidgetItem(event.get("description", ""))
             desc_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            confidence = event.get("match_confidence", -1)
+            confidence_text = str(confidence) if confidence >= 0 else "—"
+            decision_text = event.get("match_decision") or "—"
+            conf_item = QTableWidgetItem(confidence_text)
+            conf_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            decision_item = QTableWidgetItem(decision_text)
+            decision_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.events_table.setItem(r, 0, type_item)
             self.events_table.setItem(r, 1, desc_item)
+            self.events_table.setItem(r, 2, conf_item)
+            self.events_table.setItem(r, 3, decision_item)
 
 
 class ScanWorker(QThread):
@@ -250,7 +264,7 @@ class ScanWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Сканер локальної мережі (прототип диплома)")
+        self.setWindowTitle("Програмний комплекс для активного сканування та аналізу локальної мережі")
         self.resize(800, 500)
 
         # Ініціалізуємо БД
@@ -318,10 +332,12 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.changes_title_label)
 
         self.changes_table = QTableWidget()
-        self.changes_table.setColumnCount(2)
+        self.changes_table.setColumnCount(4)
         self.changes_table.setHorizontalHeaderLabels([
             "Тип події",
             "Опис",
+            "Confidence",
+            "Decision",
         ])
         self.changes_table.horizontalHeader().setStretchLastSection(True)
         self.changes_table.setSortingEnabled(True)
@@ -633,13 +649,23 @@ class MainWindow(QMainWindow):
                 event_type = event.get("event_type", "")
                 description = event.get("description", "")
 
+                confidence = event.get("match_confidence", -1)
+                confidence_text = str(confidence) if confidence >= 0 else "—"
+                decision_text = event.get("match_decision") or "—"
+
                 type_item = QTableWidgetItem(event_type)
                 type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 description_item = QTableWidgetItem(description)
                 description_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                confidence_item = QTableWidgetItem(confidence_text)
+                confidence_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                decision_item = QTableWidgetItem(decision_text)
+                decision_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
 
                 self.changes_table.setItem(row, 0, type_item)
                 self.changes_table.setItem(row, 1, description_item)
+                self.changes_table.setItem(row, 2, confidence_item)
+                self.changes_table.setItem(row, 3, decision_item)
             self.changes_table.setSortingEnabled(True)
 
         # Рахуємо і зберігаємо оцінки уваги

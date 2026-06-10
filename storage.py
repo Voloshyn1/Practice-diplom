@@ -6,7 +6,7 @@ from typing import Callable
 
 # Файл бази даних буде лежати поруч з .py-файлами
 DB_PATH = Path(__file__).with_name("scanner.db")
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _get_connection():
@@ -331,6 +331,32 @@ def _migration_006_host_enrichment(cur):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_hosts_mac ON hosts(mac);")
 
 
+
+
+def _migration_007_event_identity_metadata(cur):
+    """
+    Додає метадані confidence-based зіставлення хостів до подій.
+    """
+    if _table_exists(cur, "events"):
+        _ensure_column(
+            cur,
+            table_name="events",
+            column_name="match_confidence",
+            column_def="INTEGER NOT NULL DEFAULT -1",
+        )
+        _ensure_column(
+            cur,
+            table_name="events",
+            column_name="match_decision",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            cur,
+            table_name="events",
+            column_name="match_reasons",
+            column_def="TEXT NOT NULL DEFAULT ''",
+        )
+
 def inspect_schema_state() -> dict[str, list[str]]:
     """
     Невеликий допоміжний інструмент для дебагу міграцій.
@@ -355,6 +381,7 @@ MIGRATIONS: dict[int, Callable] = {
     4: _migration_004_attention_schema,
     5: _migration_005_history_indexes,
     6: _migration_006_host_enrichment,
+    7: _migration_007_event_identity_metadata,
 }
 
 
@@ -569,6 +596,23 @@ def load_hosts_for_scan(scan_id: int) -> list[dict]:
         conn.close()
 
 
+def _normalize_match_reasons(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "; ".join(str(item) for item in value)
+    return str(value)
+
+
+def _normalize_match_confidence(value) -> int:
+    if value is None or value == "":
+        return -1
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
 def save_events(scan_id: int, events: list[dict]):
     """
     Зберігає події для конкретного сканування.
@@ -584,9 +628,10 @@ def save_events(scan_id: int, events: list[dict]):
                 cur.execute(
                     """
                     INSERT INTO events (
-                        scan_id, ip, event_type, old_value, new_value, description, created_at
+                        scan_id, ip, event_type, old_value, new_value, description,
+                        created_at, match_confidence, match_decision, match_reasons
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
                     (
                         scan_id,
@@ -596,6 +641,9 @@ def save_events(scan_id: int, events: list[dict]):
                         event.get("new_value", ""),
                         event.get("description", ""),
                         datetime.now().isoformat(),
+                        _normalize_match_confidence(event.get("match_confidence", -1)),
+                        event.get("match_decision", ""),
+                        _normalize_match_reasons(event.get("match_reasons", "")),
                     ),
                 )
     finally:
@@ -611,7 +659,8 @@ def load_events_for_scan(scan_id: int) -> list[dict]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, scan_id, ip, event_type, old_value, new_value, description, created_at
+            SELECT id, scan_id, ip, event_type, old_value, new_value, description,
+                   created_at, match_confidence, match_decision, match_reasons
             FROM events
             WHERE scan_id = ?
             ORDER BY id ASC;
@@ -629,6 +678,9 @@ def load_events_for_scan(scan_id: int) -> list[dict]:
                 "new_value": row[5],
                 "description": row[6],
                 "created_at": row[7],
+                "match_confidence": int(row[8] if row[8] is not None else -1),
+                "match_decision": row[9] or "",
+                "match_reasons": row[10] or "",
             }
             for row in rows
         ]
@@ -782,7 +834,8 @@ def get_device_recent_events(ip: str, limit: int = 10) -> list[dict]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT scan_id, event_type, old_value, new_value, description, created_at
+            SELECT scan_id, event_type, old_value, new_value, description, created_at,
+                   match_confidence, match_decision, match_reasons
             FROM events
             WHERE ip = ?
             ORDER BY id DESC
@@ -799,6 +852,9 @@ def get_device_recent_events(ip: str, limit: int = 10) -> list[dict]:
                 "new_value": row[3],
                 "description": row[4],
                 "created_at": row[5],
+                "match_confidence": int(row[6] if row[6] is not None else -1),
+                "match_decision": row[7] or "",
+                "match_reasons": row[8] or "",
             }
             for row in rows
         ]
@@ -1041,7 +1097,10 @@ def export_latest_events_csv(path: str):
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(["id", "scan_id", "ip", "event_type", "old_value", "new_value", "description", "created_at"])
+        writer.writerow([
+            "id", "scan_id", "ip", "event_type", "old_value", "new_value",
+            "description", "created_at", "match_confidence", "match_decision", "match_reasons"
+        ])
         for event in events:
             writer.writerow([
                 event.get("id", ""),
@@ -1052,6 +1111,9 @@ def export_latest_events_csv(path: str):
                 event.get("new_value", ""),
                 event.get("description", ""),
                 event.get("created_at", ""),
+                event.get("match_confidence", -1),
+                event.get("match_decision", ""),
+                event.get("match_reasons", ""),
             ])
 
 

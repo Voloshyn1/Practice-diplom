@@ -15,6 +15,11 @@ def build_scan_summary(
     port_changes = sum(
         1 for e in events if e.get("event_type") in {"NEW_PORT_OPENED", "PORT_CLOSED"}
     )
+    ambiguous_identity_events = sum(
+        1 for e in events
+        if e.get("event_type") == "HOST_AMBIGUOUS_MATCH"
+        or e.get("match_decision") == "ambiguous"
+    )
 
     lines = [
         f"Сканування мережі {network} завершено.",
@@ -31,6 +36,9 @@ def build_scan_summary(
         f"{total_changes} змін: {new_hosts} нових хостів, "
         f"{disappeared_hosts} хостів зникли, {port_changes} змін портів."
     )
+
+    if ambiguous_identity_events:
+        lines.append("Частина змін має невизначену ідентичність хоста та потребує ручної перевірки.")
 
     if host_scores:
         lines.append("Найбільш важливі хости за рівнем уваги:")
