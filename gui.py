@@ -481,11 +481,17 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(overview_layout)
 
     def _build_tables_and_summary(self, main_layout: QVBoxLayout):
+        content_splitter = QSplitter(Qt.Vertical)
+        content_splitter.setChildrenCollapsible(False)
+
+        hosts_panel = QWidget()
+        hosts_layout = QVBoxLayout(hosts_panel)
+        hosts_layout.setContentsMargins(0, 0, 0, 0)
         self.hosts_title_label = _make_section_label("Активні хости")
-        main_layout.addWidget(self.hosts_title_label)
+        hosts_layout.addWidget(self.hosts_title_label)
         self.hosts_empty_label = QLabel("Активні хости ще не виявлені.")
         self.hosts_empty_label.setStyleSheet(EMPTY_STATE_STYLE)
-        main_layout.addWidget(self.hosts_empty_label)
+        hosts_layout.addWidget(self.hosts_empty_label)
 
         self.table = QTableWidget()
         self.table.setColumnCount(3)
@@ -500,9 +506,10 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(1, 190)
         self.table.cellDoubleClicked.connect(self.on_main_table_double_click)
         self.table.setSortingEnabled(True)
-        main_layout.addWidget(self.table, stretch=2)
+        hosts_layout.addWidget(self.table)
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
         changes_panel = QWidget()
         changes_layout = QVBoxLayout(changes_panel)
         changes_layout.setContentsMargins(0, 0, 0, 0)
@@ -512,6 +519,7 @@ class MainWindow(QMainWindow):
         self.changes_status_label.setStyleSheet(EMPTY_STATE_STYLE)
         changes_layout.addWidget(self.changes_status_label)
         self.changes_table = QTableWidget()
+        self.changes_table.setMinimumHeight(220)
         self.changes_table.setColumnCount(4)
         self.changes_table.setHorizontalHeaderLabels([
             "Тип події",
@@ -541,6 +549,7 @@ class MainWindow(QMainWindow):
         self.scores_empty_label.setStyleSheet(EMPTY_STATE_STYLE)
         scores_layout.addWidget(self.scores_empty_label)
         self.scores_table = QTableWidget()
+        self.scores_table.setMinimumHeight(220)
         self.scores_table.setColumnCount(4)
         self.scores_table.setHorizontalHeaderLabels([
             "IP",
@@ -561,15 +570,27 @@ class MainWindow(QMainWindow):
         splitter.addWidget(scores_panel)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        main_layout.addWidget(splitter, stretch=3)
+        splitter.setSizes([720, 480])
 
+        summary_panel = QWidget()
+        summary_layout = QVBoxLayout(summary_panel)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
         self.summary_title_label = _make_section_label("Підсумок сканування")
-        main_layout.addWidget(self.summary_title_label)
+        summary_layout.addWidget(self.summary_title_label)
         self.summary_text_label = QLabel("")
         self.summary_text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.summary_text_label.setWordWrap(True)
-        self.summary_text_label.setMinimumHeight(70)
-        main_layout.addWidget(self.summary_text_label)
+        self.summary_text_label.setMinimumHeight(120)
+        summary_layout.addWidget(self.summary_text_label)
+
+        content_splitter.addWidget(hosts_panel)
+        content_splitter.addWidget(splitter)
+        content_splitter.addWidget(summary_panel)
+        content_splitter.setStretchFactor(0, 2)
+        content_splitter.setStretchFactor(1, 3)
+        content_splitter.setStretchFactor(2, 1)
+        content_splitter.setSizes([250, 330, 170])
+        main_layout.addWidget(content_splitter, stretch=1)
 
     def _build_progress_area(self, main_layout: QVBoxLayout):
         self.progress_bar = QProgressBar()
