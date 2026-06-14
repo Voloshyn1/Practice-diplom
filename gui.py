@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QAbstractItemView,
     QSizePolicy,
+    QPlainTextEdit,
 )
 
 from analyzer import compare_scans, get_previous_scan_data
@@ -35,12 +36,11 @@ from scanner import scan_network
 from ports_data import DEFAULT_TCP_PORTS
 
 SECTION_HEADING_STYLE = "font-weight: 600; margin-top: 6px;"
-EMPTY_STATE_STYLE = "color: #666; font-style: italic;"
+EMPTY_STATE_STYLE = "color: #a0a0a0; font-style: italic;"
 CARD_STYLE = """
-QFrame {
-    border: 1px solid #c8c8c8;
+QFrame#OverviewCard {
+    border: 1px solid palette(mid);
     border-radius: 6px;
-    padding: 6px;
     background: palette(base);
 }
 """
@@ -62,6 +62,28 @@ def _polish_table(table: QTableWidget):
 
 def _set_table_empty_state(label: QLabel, text: str, has_records: bool):
     label.setText("" if has_records else text)
+
+
+def _display_event_type(event_type: str) -> str:
+    return {
+        "NEW_HOST": "Новий хост",
+        "HOST_DISAPPEARED": "Хост не виявлено",
+        "HOST_IP_CHANGED": "Зміна IP-адреси",
+        "HOST_AMBIGUOUS_MATCH": "Невизначена ідентичність",
+        "NEW_PORT_OPENED": "Відкрито новий порт",
+        "PORT_CLOSED": "Порт закрито",
+        "ROLE_CHANGED": "Зміна ролі",
+    }.get(event_type, event_type)
+
+
+def _display_attention_level(level: str) -> str:
+    return {
+        "Low": "Низький",
+        "Moderate": "Помірний",
+        "Elevated": "Підвищений",
+        "High": "Високий",
+        "Critical": "Критичний",
+    }.get(level, level)
 
 
 def _confidence_text(event: dict) -> str:
@@ -139,7 +161,7 @@ class DevicePassportDialog(QDialog):
             f"Поточні порти: {passport.get('current_open_ports') or '—'}\n"
             f"Кількість появ у сканах: {passport.get('appearances', 0)}\n"
             f"Остання оцінка уваги: {latest_score.get('attention_score', 0)} "
-            f"({latest_score.get('attention_level', 'Low')})\n"
+            f"({_display_attention_level(latest_score.get('attention_level', 'Low'))})\n"
             f"Причини: {reasons or '—'}\n"
             f"\nІсторичний підсумок: {passport.get('historical_summary', '')}"
         )
@@ -166,15 +188,18 @@ class DevicePassportDialog(QDialog):
         for row, event in enumerate(events):
             confidence_text = _confidence_text(event)
             decision_text = _decision_text(event)
+            event_type = event.get("event_type", "")
             for col, value in enumerate([
                 event.get("created_at", ""),
-                event.get("event_type", ""),
+                _display_event_type(event_type),
                 event.get("description", ""),
                 confidence_text,
                 decision_text,
                 str(event.get("scan_id", "")),
             ]):
                 item = QTableWidgetItem(value)
+                if col == 1 and event_type:
+                    item.setToolTip(event_type)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 events_table.setItem(row, col, item)
         events_table.setSortingEnabled(True)
@@ -306,7 +331,10 @@ class ScanHistoryDialog(QDialog):
         self.events_table.setSortingEnabled(False)
         self.events_table.setRowCount(len(events))
         for r, event in enumerate(events):
-            type_item = QTableWidgetItem(event.get("event_type", ""))
+            event_type = event.get("event_type", "")
+            type_item = QTableWidgetItem(_display_event_type(event_type))
+            if event_type:
+                type_item.setToolTip(event_type)
             type_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             desc_item = QTableWidgetItem(event.get("description", ""))
             desc_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
@@ -466,14 +494,15 @@ class MainWindow(QMainWindow):
             ("last_scan", "Останній скан"),
         ]:
             card = QFrame()
+            card.setObjectName("OverviewCard")
             card.setStyleSheet(CARD_STYLE)
             card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(8, 4, 8, 4)
             title_label = QLabel(title)
-            title_label.setStyleSheet("font-size: 11px; color: #666;")
+            title_label.setStyleSheet("font-size: 11px; color: #b0b0b0;")
             value_label = QLabel("—")
-            value_label.setStyleSheet("font-size: 18px; font-weight: 600;")
+            value_label.setStyleSheet("font-size: 18px; font-weight: 600; color: palette(text);")
             card_layout.addWidget(title_label)
             card_layout.addWidget(value_label)
             overview_layout.addWidget(card)
@@ -483,6 +512,7 @@ class MainWindow(QMainWindow):
     def _build_tables_and_summary(self, main_layout: QVBoxLayout):
         content_splitter = QSplitter(Qt.Vertical)
         content_splitter.setChildrenCollapsible(False)
+        content_splitter.setHandleWidth(6)
 
         hosts_panel = QWidget()
         hosts_layout = QVBoxLayout(hosts_panel)
@@ -494,6 +524,7 @@ class MainWindow(QMainWindow):
         hosts_layout.addWidget(self.hosts_empty_label)
 
         self.table = QTableWidget()
+        self.table.setMinimumHeight(210)
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels([
             "IP-адреса",
@@ -510,6 +541,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(6)
         changes_panel = QWidget()
         changes_layout = QVBoxLayout(changes_panel)
         changes_layout.setContentsMargins(0, 0, 0, 0)
@@ -519,7 +551,7 @@ class MainWindow(QMainWindow):
         self.changes_status_label.setStyleSheet(EMPTY_STATE_STYLE)
         changes_layout.addWidget(self.changes_status_label)
         self.changes_table = QTableWidget()
-        self.changes_table.setMinimumHeight(220)
+        self.changes_table.setMinimumHeight(210)
         self.changes_table.setColumnCount(4)
         self.changes_table.setHorizontalHeaderLabels([
             "Тип події",
@@ -549,7 +581,7 @@ class MainWindow(QMainWindow):
         self.scores_empty_label.setStyleSheet(EMPTY_STATE_STYLE)
         scores_layout.addWidget(self.scores_empty_label)
         self.scores_table = QTableWidget()
-        self.scores_table.setMinimumHeight(220)
+        self.scores_table.setMinimumHeight(210)
         self.scores_table.setColumnCount(4)
         self.scores_table.setHorizontalHeaderLabels([
             "IP",
@@ -570,17 +602,17 @@ class MainWindow(QMainWindow):
         splitter.addWidget(scores_panel)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([720, 480])
+        splitter.setSizes([760, 480])
 
         summary_panel = QWidget()
         summary_layout = QVBoxLayout(summary_panel)
         summary_layout.setContentsMargins(0, 0, 0, 0)
         self.summary_title_label = _make_section_label("Підсумок сканування")
         summary_layout.addWidget(self.summary_title_label)
-        self.summary_text_label = QLabel("")
-        self.summary_text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.summary_text_label.setWordWrap(True)
-        self.summary_text_label.setMinimumHeight(120)
+        self.summary_text_label = QPlainTextEdit()
+        self.summary_text_label.setReadOnly(True)
+        self.summary_text_label.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.summary_text_label.setMinimumHeight(110)
         summary_layout.addWidget(self.summary_text_label)
 
         content_splitter.addWidget(hosts_panel)
@@ -589,7 +621,7 @@ class MainWindow(QMainWindow):
         content_splitter.setStretchFactor(0, 2)
         content_splitter.setStretchFactor(1, 3)
         content_splitter.setStretchFactor(2, 1)
-        content_splitter.setSizes([250, 330, 170])
+        content_splitter.setSizes([270, 310, 140])
         main_layout.addWidget(content_splitter, stretch=1)
 
     def _build_progress_area(self, main_layout: QVBoxLayout):
@@ -599,6 +631,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximum(1)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("")
+        self.progress_bar.setVisible(False)
         main_layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("Готово до сканування.")
@@ -614,13 +647,13 @@ class MainWindow(QMainWindow):
     def _reset_overview_cards(self):
         self.overview_values["hosts"].setText("0")
         self.overview_values["changes"].setText("0")
-        self.overview_values["attention"].setText("Low")
+        self.overview_values["attention"].setText(_display_attention_level("Low"))
         self.overview_values["last_scan"].setText("—")
 
     def _update_overview_cards(self, *, host_count: int, event_count: int, attention_total: int, attention_level: str, scan_id: int, finished_at: datetime):
         self.overview_values["hosts"].setText(str(host_count))
         self.overview_values["changes"].setText(str(event_count))
-        self.overview_values["attention"].setText(f"{attention_total} / {attention_level}")
+        self.overview_values["attention"].setText(f"{attention_total} / {_display_attention_level(attention_level)}")
         self.overview_values["last_scan"].setText(f"ID {scan_id} · {finished_at.strftime('%H:%M')}")
 
     def _update_ports_tooltip(self, text: str):
@@ -719,11 +752,12 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.changes_table.setRowCount(0)
         self.scores_table.setRowCount(0)
-        self.summary_text_label.setText("")
+        self.summary_text_label.clear()
         self.hosts_empty_label.setText("Активні хости ще не виявлені.")
         self.changes_status_label.setText("Виконайте щонайменше два сканування для аналізу змін.")
         self.scores_empty_label.setText("Події, що потребують уваги, не виявлені.")
 
+        self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Сканування...")
@@ -754,6 +788,7 @@ class MainWindow(QMainWindow):
         )
 
         if host_info is not None and isinstance(host_info, dict):
+            self.hosts_empty_label.setText("")
             ip = host_info.get("ip", "")
             ports = host_info.get("open_ports", [])
             role = host_info.get("role", "")
@@ -835,6 +870,14 @@ class MainWindow(QMainWindow):
             self.changes_table.setSortingEnabled(True)
             self.scores_table.setSortingEnabled(True)
             self.changes_status_label.setText("Не вдалося виконати аналіз змін.")
+            self._update_overview_cards(
+                host_count=len(hosts),
+                event_count=0,
+                attention_total=0,
+                attention_level="Low",
+                scan_id=scan_id,
+                finished_at=finished_at,
+            )
             QMessageBox.warning(
                 self,
                 "Попередження",
@@ -842,6 +885,7 @@ class MainWindow(QMainWindow):
             )
 
         self.worker = None
+        QTimer.singleShot(3000, self._hide_progress_if_idle)
         if self.scheduler_checkbox.isChecked():
             self._schedule_next_run()
 
@@ -872,14 +916,17 @@ class MainWindow(QMainWindow):
             self.changes_table.setSortingEnabled(False)
             self.changes_table.setRowCount(len(saved_events))
             for row, event in enumerate(saved_events):
+                event_type = event.get("event_type", "")
                 values = [
-                    event.get("event_type", ""),
+                    _display_event_type(event_type),
                     event.get("description", ""),
                     _confidence_text(event),
                     _decision_text(event),
                 ]
                 for col, value in enumerate(values):
                     item = QTableWidgetItem(value)
+                    if col == 0 and event_type:
+                        item.setToolTip(event_type)
                     item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                     self.changes_table.setItem(row, col, item)
             self.changes_table.setSortingEnabled(True)
@@ -895,7 +942,7 @@ class MainWindow(QMainWindow):
             values = [
                 item.get("ip", ""),
                 score,
-                item.get("attention_level", "Low"),
+                _display_attention_level(item.get("attention_level", "Low")),
                 "; ".join(item.get("reasons", [])),
             ]
             for col, value in enumerate(values):
@@ -922,10 +969,10 @@ class MainWindow(QMainWindow):
         total_score = stored_summary.get("attention_score_total", 0)
         total_level = derive_attention_level(int(total_score))
         visible_summary = (
-            f"Загальна оцінка уваги: {total_score} ({total_level})\n\n"
+            f"Загальна оцінка уваги: {total_score} ({_display_attention_level(total_level)})\n\n"
             f"{stored_summary.get('summary_text', '')}"
         )
-        self.summary_text_label.setText(visible_summary)
+        self.summary_text_label.setPlainText(visible_summary)
         self._update_overview_cards(
             host_count=host_count,
             event_count=len(saved_events),
@@ -952,6 +999,10 @@ class MainWindow(QMainWindow):
         )
         if self.scheduler_checkbox.isChecked():
             self._schedule_next_run()
+
+    def _hide_progress_if_idle(self):
+        if not self._is_scan_running():
+            self.progress_bar.setVisible(False)
 
     def on_scheduler_toggled(self, checked: bool):
         if checked:
