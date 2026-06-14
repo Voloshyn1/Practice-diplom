@@ -166,10 +166,20 @@ def score_host_pair(prev: dict, cur: dict) -> dict:
         score -= 20
         penalties.append("IP збігається, але MAC різний (можливе перевикористання IP)")
 
+    exact_global_mac_match = (
+        prev_mac and cur_mac and prev_mac == cur_mac
+        and not is_locally_administered_mac(prev_mac)
+    )
+
     if prev_mac and cur_mac and prev_mac == cur_mac:
         if host_evidence < 0.30 and port_evidence < 0.20:
             score -= 8
             penalties.append("MAC збіг без підтримки hostname/портів")
+
+    if exact_global_mac_match and not strong_mac_conflict:
+        if score < 85:
+            score = 85
+        reasons.append("Глобальна MAC-адреса точно збігається")
 
     # Пост-правила для кейсів без MAC, коли інші стабільні ознаки узгоджені.
     if (
@@ -182,6 +192,16 @@ def score_host_pair(prev: dict, cur: dict) -> dict:
         if score < 75:
             score = 75
         reasons.append("IP збігається, hostname, порти та роль підтверджують схожість без MAC")
+    elif (
+        prev_ip and cur_ip and prev_ip == cur_ip and
+        not strong_mac_conflict and
+        host_evidence >= 0.90 and
+        port_evidence >= 0.50 and
+        role_evidence >= 0.50
+    ):
+        if score < 72:
+            score = 72
+        reasons.append("IP збігається, а hostname, порти та роль дають достатню підтримку")
     elif (
         prev_ip and cur_ip and prev_ip == cur_ip and
         not strong_mac_conflict and
@@ -268,9 +288,10 @@ def match_hosts(previous_hosts: list[dict], current_hosts: list[dict]) -> dict:
             and p["decision"] == "ambiguous"
         ]
         if candidates:
-            candidates.sort(key=lambda x: -x["score"])
-            for cand in candidates:
-                ambiguous_prev_idx.add(cand["prev_idx"])
+            candidates.sort(key=lambda x: (-x["score"], x["prev"].get("ip") or ""))
+            # Reserve only the best ambiguous previous candidate. Other similar
+            # previous hosts remain unmatched, so real disappearances are not hidden.
+            ambiguous_prev_idx.add(candidates[0]["prev_idx"])
             ambiguous.append({
                 "cur": cur,
                 "candidates": [

@@ -4,9 +4,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from identity_matcher import normalize_mac
+
 # Файл бази даних буде лежати поруч з .py-файлами
 DB_PATH = Path(__file__).with_name("scanner.db")
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _get_connection():
@@ -357,6 +359,164 @@ def _migration_007_event_identity_metadata(cur):
             column_def="TEXT NOT NULL DEFAULT ''",
         )
 
+
+def _device_identity_key(*, ip: str, mac: str) -> str:
+    norm_mac = normalize_mac(mac)
+    if norm_mac:
+        return f"mac:{norm_mac}"
+    return f"ip:{(ip or '').strip()}"
+
+
+def _migration_008_stable_device_identity(cur):
+    """
+    Rebuilds devices without UNIQUE(ip) and adds identity_key.
+
+    Existing rows are preserved. Rows with the same non-empty normalized MAC are
+    merged into one stable device row; hosts are remapped to the canonical row.
+    IP remains an observation value and is no longer treated as permanent identity.
+    """
+    if not _table_exists(cur, "devices") or not _table_exists(cur, "hosts"):
+        return
+
+    columns = _get_table_columns(cur, "devices")
+    if "identity_key" in columns:
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_identity_key ON devices(identity_key);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip);")
+        return
+
+    cur.execute(
+        """
+        CREATE TABLE devices_v8 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            identity_key TEXT NOT NULL UNIQUE,
+            ip TEXT NOT NULL DEFAULT '',
+            hostname TEXT NOT NULL DEFAULT '',
+            mac TEXT NOT NULL DEFAULT '',
+            vendor TEXT NOT NULL DEFAULT '',
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            last_role TEXT NOT NULL DEFAULT '',
+            last_open_ports TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE device_id_map_v8 (
+            old_id INTEGER PRIMARY KEY,
+            new_id INTEGER NOT NULL
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        SELECT id, ip, hostname, mac, vendor, first_seen, last_seen, last_role, last_open_ports
+        FROM devices
+        ORDER BY id;
+        """
+    )
+    for old_id, ip, hostname, mac, vendor, first_seen, last_seen, role, ports in cur.fetchall():
+        identity_key = _device_identity_key(ip=ip or "", mac=mac or "")
+        cur.execute("SELECT id, first_seen, last_seen FROM devices_v8 WHERE identity_key = ?;", (identity_key,))
+        existing = cur.fetchone()
+        if existing:
+            new_id, existing_first_seen, existing_last_seen = existing
+            merged_first_seen = min(existing_first_seen, first_seen or existing_first_seen)
+            merged_last_seen = max(existing_last_seen, last_seen or existing_last_seen)
+            if (last_seen or "") >= (existing_last_seen or ""):
+                cur.execute(
+                    """
+                    UPDATE devices_v8
+                    SET ip = ?, hostname = ?, mac = ?, vendor = ?, first_seen = ?,
+                        last_seen = ?, last_role = ?, last_open_ports = ?
+                    WHERE id = ?;
+                    """,
+                    (
+                        ip or "",
+                        hostname or "",
+                        normalize_mac(mac or "") or (mac or ""),
+                        vendor or "",
+                        merged_first_seen,
+                        merged_last_seen,
+                        role or "",
+                        ports or "",
+                        new_id,
+                    ),
+                )
+            else:
+                cur.execute(
+                    "UPDATE devices_v8 SET first_seen = ?, last_seen = ? WHERE id = ?;",
+                    (merged_first_seen, merged_last_seen, new_id),
+                )
+        else:
+            cur.execute(
+                """
+                INSERT INTO devices_v8 (
+                    id, identity_key, ip, hostname, mac, vendor, first_seen, last_seen,
+                    last_role, last_open_ports
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    old_id,
+                    identity_key,
+                    ip or "",
+                    hostname or "",
+                    normalize_mac(mac or "") or (mac or ""),
+                    vendor or "",
+                    first_seen or "",
+                    last_seen or "",
+                    role or "",
+                    ports or "",
+                ),
+            )
+            new_id = old_id
+
+        cur.execute(
+            "INSERT INTO device_id_map_v8(old_id, new_id) VALUES (?, ?);",
+            (old_id, new_id),
+        )
+
+    cur.execute(
+        """
+        CREATE TABLE hosts_v8 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id INTEGER NOT NULL,
+            device_id INTEGER NOT NULL,
+            ip TEXT NOT NULL,
+            hostname TEXT NOT NULL DEFAULT '',
+            open_ports TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT '',
+            mac TEXT NOT NULL DEFAULT '',
+            vendor TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY (scan_id) REFERENCES scans (id) ON DELETE CASCADE,
+            FOREIGN KEY (device_id) REFERENCES devices_v8 (id) ON DELETE CASCADE
+        );
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO hosts_v8 (id, scan_id, device_id, ip, hostname, open_ports, role, mac, vendor)
+        SELECT h.id, h.scan_id, m.new_id, h.ip, h.hostname, h.open_ports, h.role, h.mac, h.vendor
+        FROM hosts h
+        JOIN device_id_map_v8 m ON m.old_id = h.device_id;
+        """
+    )
+
+    cur.execute("DROP TABLE hosts;")
+    cur.execute("DROP TABLE devices;")
+    cur.execute("ALTER TABLE devices_v8 RENAME TO devices;")
+    cur.execute("ALTER TABLE hosts_v8 RENAME TO hosts;")
+    cur.execute("DROP TABLE device_id_map_v8;")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_identity_key ON devices(identity_key);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hosts_scan_id ON hosts(scan_id);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts(ip);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hosts_mac ON hosts(mac);")
+
+
 def inspect_schema_state() -> dict[str, list[str]]:
     """
     Невеликий допоміжний інструмент для дебагу міграцій.
@@ -382,6 +542,7 @@ MIGRATIONS: dict[int, Callable] = {
     5: _migration_005_history_indexes,
     6: _migration_006_host_enrichment,
     7: _migration_007_event_identity_metadata,
+    8: _migration_008_stable_device_identity,
 }
 
 
@@ -419,7 +580,8 @@ def _upsert_device(
     Додає пристрій у devices або оновлює існуючий.
     Повертає id пристрою (device_id).
     """
-    cur.execute("SELECT id, first_seen FROM devices WHERE ip = ?;", (ip,))
+    identity_key = _device_identity_key(ip=ip, mac=mac)
+    cur.execute("SELECT id, first_seen FROM devices WHERE identity_key = ?;", (identity_key,))
     row = cur.fetchone()
 
     seen_iso = seen_at.isoformat()
@@ -431,6 +593,7 @@ def _upsert_device(
             """
             UPDATE devices
             SET hostname = ?,
+                ip = ?,
                 mac = ?,
                 vendor = ?,
                 last_seen = ?,
@@ -438,7 +601,7 @@ def _upsert_device(
                 last_open_ports = ?
             WHERE id = ?;
             """,
-            (hostname, mac, vendor, seen_iso, role, open_ports_str, device_id),
+            (hostname, ip, normalize_mac(mac) or mac, vendor, seen_iso, role, open_ports_str, device_id),
         )
         return device_id
     else:
@@ -446,11 +609,11 @@ def _upsert_device(
         cur.execute(
             """
             INSERT INTO devices (
-                ip, hostname, mac, vendor, first_seen, last_seen, last_role, last_open_ports
+                identity_key, ip, hostname, mac, vendor, first_seen, last_seen, last_role, last_open_ports
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
-            (ip, hostname, mac, vendor, seen_iso, seen_iso, role, open_ports_str),
+            (identity_key, ip, hostname, normalize_mac(mac) or mac, vendor, seen_iso, seen_iso, role, open_ports_str),
         )
         return cur.lastrowid
 
@@ -865,20 +1028,36 @@ def get_device_recent_events(ip: str, limit: int = 10) -> list[dict]:
 def get_device_scan_history(ip: str) -> list[dict]:
     """
     Повертає історію появ пристрою в скануваннях.
+    IP використовується як сумісний вхід: спочатку знаходимо останнє
+    спостереження, а історію будуємо за stable device_id.
     """
     conn = _get_connection()
     try:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT s.id, s.network, s.started_at, s.finished_at, s.host_count,
-                   h.role, h.open_ports, h.hostname, h.mac, h.vendor, s.attention_score_total
-            FROM hosts h
-            JOIN scans s ON s.id = h.scan_id
-            WHERE h.ip = ?
-            ORDER BY s.id DESC;
+            SELECT device_id
+            FROM hosts
+            WHERE ip = ?
+            ORDER BY scan_id DESC, id DESC
+            LIMIT 1;
             """,
             (ip,),
+        )
+        device_row = cur.fetchone()
+        if not device_row:
+            return []
+        device_id = device_row[0]
+        cur.execute(
+            """
+            SELECT s.id, s.network, s.started_at, s.finished_at, s.host_count,
+                   h.role, h.open_ports, h.hostname, h.mac, h.vendor, s.attention_score_total, h.ip
+            FROM hosts h
+            JOIN scans s ON s.id = h.scan_id
+            WHERE h.device_id = ?
+            ORDER BY s.id DESC;
+            """,
+            (device_id,),
         )
         rows = cur.fetchall()
         history: list[dict] = []
@@ -895,6 +1074,7 @@ def get_device_scan_history(ip: str) -> list[dict]:
                 "mac": row[8] or "",
                 "vendor": row[9] or "",
                 "attention_score_total": int(row[10] or 0),
+                "ip": row[11] or "",
             })
         return history
     finally:
@@ -903,16 +1083,20 @@ def get_device_scan_history(ip: str) -> list[dict]:
 
 def get_device_passport(ip: str) -> dict:
     """
-    Повертає паспорт пристрою за IP.
+    Повертає паспорт пристрою за IP останнього відомого спостереження.
     """
     conn = _get_connection()
     try:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT ip, hostname, mac, vendor, first_seen, last_seen, last_role, last_open_ports
-            FROM devices
-            WHERE ip = ?;
+            SELECT d.id, d.ip, d.hostname, d.mac, d.vendor, d.first_seen, d.last_seen,
+                   d.last_role, d.last_open_ports
+            FROM hosts h
+            JOIN devices d ON d.id = h.device_id
+            WHERE h.ip = ?
+            ORDER BY h.scan_id DESC, h.id DESC
+            LIMIT 1;
             """,
             (ip,),
         )
@@ -920,18 +1104,26 @@ def get_device_passport(ip: str) -> dict:
         if not row:
             return {}
 
-        cur.execute("SELECT COUNT(*) FROM hosts WHERE ip = ?;", (ip,))
+        device_id = row[0]
+        current_ip = row[1] or ip
+
+        cur.execute("SELECT COUNT(*) FROM hosts WHERE device_id = ?;", (device_id,))
         appearances = int(cur.fetchone()[0] or 0)
+
+        cur.execute("SELECT DISTINCT ip FROM hosts WHERE device_id = ?;", (device_id,))
+        observed_ips = [r[0] for r in cur.fetchall() if r[0]]
 
         cur.execute(
             """
-            SELECT attention_score, attention_level, reasons, scan_id, created_at
+            SELECT attention_score, attention_level, reasons, scan_id, created_at, ip
             FROM device_scores
-            WHERE ip = ?
+            WHERE ip IN (
+                SELECT DISTINCT ip FROM hosts WHERE device_id = ?
+            )
             ORDER BY id DESC
             LIMIT 1;
             """,
-            (ip,),
+            (device_id,),
         )
         score_row = cur.fetchone()
         latest_score = {
@@ -940,27 +1132,34 @@ def get_device_passport(ip: str) -> dict:
             "reasons": score_row[2] if score_row else "",
             "scan_id": score_row[3] if score_row else None,
             "created_at": score_row[4] if score_row else "",
+            "ip": score_row[5] if score_row else "",
         }
     finally:
         conn.close()
 
-    recent_events = get_device_recent_events(ip, limit=10)
+    recent_events: list[dict] = []
+    for observed_ip in observed_ips:
+        recent_events.extend(get_device_recent_events(observed_ip, limit=10))
+    recent_events.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    recent_events = recent_events[:10]
 
     historical_summary = (
-        f"Пристрій {ip} з'являвся у {appearances} скануваннях. "
-        f"Остання роль: {row[6] or '—'}. "
-        f"Останні порти: {row[7] or '—'}."
+        f"Пристрій {current_ip} з'являвся у {appearances} скануваннях. "
+        f"Відомі IP: {', '.join(observed_ips) or '—'}. "
+        f"Остання роль: {row[7] or '—'}. "
+        f"Останні порти: {row[8] or '—'}."
     )
 
     return {
-        "ip": row[0],
-        "hostname": row[1] or "",
-        "mac": row[2] or "",
-        "vendor": row[3] or "",
-        "first_seen": row[4] or "",
-        "last_seen": row[5] or "",
-        "current_role": row[6] or "",
-        "current_open_ports": row[7] or "",
+        "device_id": device_id,
+        "ip": current_ip,
+        "hostname": row[2] or "",
+        "mac": row[3] or "",
+        "vendor": row[4] or "",
+        "first_seen": row[5] or "",
+        "last_seen": row[6] or "",
+        "current_role": row[7] or "",
+        "current_open_ports": row[8] or "",
         "appearances": appearances,
         "latest_score": latest_score,
         "recent_events": recent_events,

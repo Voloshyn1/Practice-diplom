@@ -12,6 +12,7 @@ from ports_data import DEFAULT_TCP_PORTS, PORT_SERVICE_LABELS
 DEFAULT_PORTS = DEFAULT_TCP_PORTS
 DEFAULT_DISCOVERY_MODE = "mixed"
 DEFAULT_MAX_WORKERS = 64
+MAX_SCAN_HOSTS = 4096
 
 
 def ping_host(ip: str, timeout_sec: float = 0.3) -> bool:
@@ -201,7 +202,19 @@ def scan_network(
     max_workers: int = DEFAULT_MAX_WORKERS,
     timeout: float = 0.3,
 ) -> list[dict]:
-    network = ipaddress.ip_network(network_cidr, strict=False)
+    try:
+        network = ipaddress.ip_network(network_cidr, strict=False)
+    except ValueError as exc:
+        raise ValueError("Invalid CIDR network.") from exc
+
+    if network.version != 4:
+        raise ValueError("Only IPv4 networks are supported by this scanner.")
+
+    if network.num_addresses > MAX_SCAN_HOSTS:
+        raise ValueError(
+            f"The subnet contains too many addresses. Maximum allowed: {MAX_SCAN_HOSTS}."
+        )
+
     alive_hosts: list[dict] = []
 
     ports = ports or DEFAULT_PORTS
@@ -224,7 +237,12 @@ def scan_network(
         completed = 0
         for future in as_completed(future_to_ip):
             completed += 1
-            host_info = future.result()
+            try:
+                host_info = future.result()
+            except Exception:
+                # A failure while probing one address should not abort the whole
+                # subnet scan. The failed host is skipped and progress continues.
+                host_info = None
             if host_info is not None:
                 alive_hosts.append(host_info)
             if progress_cb is not None:

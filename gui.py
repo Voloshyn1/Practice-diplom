@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 from analyzer import compare_scans, get_previous_scan_data
 from report import build_scan_summary
 from risk import calculate_host_scores, calculate_scan_attention_total, derive_attention_level
-from scanner import scan_network
+from scanner import MAX_SCAN_HOSTS, scan_network
 from ports_data import DEFAULT_TCP_PORTS
 
 SECTION_HEADING_STYLE = "font-weight: 600; margin-top: 6px;"
@@ -711,12 +711,26 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Помилка", "Будь ласка, введіть підмережу.")
             return None
         try:
-            ipaddress.ip_network(network, strict=False)
+            parsed_network = ipaddress.ip_network(network, strict=False)
         except ValueError:
             QMessageBox.warning(
                 self,
                 "Помилка формату підмережі",
                 "Введіть CIDR у форматі, наприклад: 192.168.0.0/24",
+            )
+            return None
+        if parsed_network.version != 4:
+            QMessageBox.warning(
+                self,
+                "IPv6 не підтримується",
+                "Поточна версія сканера підтримує лише IPv4-підмережі.",
+            )
+            return None
+        if parsed_network.num_addresses > MAX_SCAN_HOSTS:
+            QMessageBox.warning(
+                self,
+                "Завелика підмережа",
+                f"Підмережа містить занадто багато адрес. Максимально дозволено: {MAX_SCAN_HOSTS}.",
             )
             return None
         ports = self._parse_ports_input()

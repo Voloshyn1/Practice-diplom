@@ -6,4 +6,7 @@
 - Port-based role classification is heuristic and is not real service fingerprinting.
 - Attention score is not a CVE score and not a full vulnerability assessment.
 - TCP-only discovery may miss live hosts that do not expose any of the scanned TCP ports.
-- The device passport remains mostly IP-centric; confidence-based matching is currently used for scan-to-scan analysis, not as a full stable device identity model.
+- Device identity now uses a conservative stable key: normalized MAC when available, otherwise IP fallback. Missing/randomized MAC values can still limit long-term identity accuracy.
+
+- Поточна версія сканера підтримує IPv4; IPv6-підмережі явно відхиляються.
+- Для захисту застосунку від надмірного навантаження одне сканування обмежене 4096 адресами.

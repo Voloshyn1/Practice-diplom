@@ -1,30 +1,26 @@
 import sqlite3
+import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 
+import storage
 from report import build_scan_summary
 from risk import calculate_host_scores
-from storage import (
-    DB_PATH,
-    init_db,
-    inspect_schema_state,
-    load_events_for_scan,
-    save_events,
-    save_scan,
-)
 
 
 class IdentityMetadataIntegrationTests(unittest.TestCase):
     def setUp(self):
-        if DB_PATH.exists():
-            DB_PATH.unlink()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.original_db_path = storage.DB_PATH
+        storage.DB_PATH = Path(self.tmpdir.name) / "scanner-test.db"
 
     def tearDown(self):
-        if DB_PATH.exists():
-            DB_PATH.unlink()
+        storage.DB_PATH = self.original_db_path
+        self.tmpdir.cleanup()
 
     def test_migration_v7_adds_identity_metadata_columns(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(storage.DB_PATH)
         cur = conn.cursor()
         cur.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         cur.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '6')")
@@ -45,18 +41,18 @@ class IdentityMetadataIntegrationTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        init_db()
-        columns = inspect_schema_state()["events"]
+        storage.init_db()
+        columns = storage.inspect_schema_state()["events"]
 
         self.assertIn("match_confidence", columns)
         self.assertIn("match_decision", columns)
         self.assertIn("match_reasons", columns)
 
     def test_event_identity_metadata_persists_and_loads(self):
-        init_db()
-        scan_id = save_scan("192.168.0.0/24", datetime.now(), datetime.now(), [])
+        storage.init_db()
+        scan_id = storage.save_scan("192.168.0.0/24", datetime.now(), datetime.now(), [])
 
-        save_events(scan_id, [{
+        storage.save_events(scan_id, [{
             "ip": "192.168.0.10",
             "event_type": "HOST_IP_CHANGED",
             "old_value": "192.168.0.5",
@@ -67,16 +63,16 @@ class IdentityMetadataIntegrationTests(unittest.TestCase):
             "match_reasons": ["MAC збіг", "Hostname збіг"],
         }])
 
-        loaded = load_events_for_scan(scan_id)[0]
+        loaded = storage.load_events_for_scan(scan_id)[0]
         self.assertEqual(loaded["match_confidence"], 91)
         self.assertEqual(loaded["match_decision"], "auto-link")
         self.assertEqual(loaded["match_reasons"], "MAC збіг; Hostname збіг")
 
     def test_event_without_identity_metadata_gets_defaults(self):
-        init_db()
-        scan_id = save_scan("192.168.0.0/24", datetime.now(), datetime.now(), [])
+        storage.init_db()
+        scan_id = storage.save_scan("192.168.0.0/24", datetime.now(), datetime.now(), [])
 
-        save_events(scan_id, [{
+        storage.save_events(scan_id, [{
             "ip": "192.168.0.20",
             "event_type": "NEW_HOST",
             "old_value": "",
@@ -84,7 +80,7 @@ class IdentityMetadataIntegrationTests(unittest.TestCase):
             "description": "Новий хост",
         }])
 
-        loaded = load_events_for_scan(scan_id)[0]
+        loaded = storage.load_events_for_scan(scan_id)[0]
         self.assertEqual(loaded["match_confidence"], -1)
         self.assertEqual(loaded["match_decision"], "")
         self.assertEqual(loaded["match_reasons"], "")
@@ -107,7 +103,7 @@ class IdentityMetadataIntegrationTests(unittest.TestCase):
             network="192.168.0.0/24",
             active_host_count=2,
             events=[{"event_type": "HOST_AMBIGUOUS_MATCH", "match_decision": "ambiguous"}],
-            host_scores=[{"ip": "192.168.0.30", "attention_score": 18, "attention_level": "Low", "reasons": ["test"]}],
+            host_scores=[{"ip": "192.168.0.30", "attention_score": 20, "attention_level": "Moderate", "reasons": ["test"]}],
             has_previous_scan=True,
         )
 

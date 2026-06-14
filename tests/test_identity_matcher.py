@@ -7,6 +7,7 @@ from identity_matcher import (
     jaccard_similarity,
     match_hosts,
     normalize_hostname,
+    role_similarity,
     normalize_mac,
     score_host_pair,
 )
@@ -29,6 +30,10 @@ class IdentityMatcherTests(unittest.TestCase):
 
     def test_jaccard_both_empty_is_zero(self):
         self.assertEqual(jaccard_similarity([], []), 0.0)
+
+    def test_role_similarity_token_overlap(self):
+        self.assertGreater(role_similarity('web-server, SSH access', 'web-server'), 0.0)
+        self.assertEqual(role_similarity('', 'web-server'), 0.0)
 
     def test_same_mac_changed_ip_high_score(self):
         prev = {
@@ -152,12 +157,12 @@ class IdentityMatcherTests(unittest.TestCase):
 class AnalyzerLocalizationTests(unittest.TestCase):
     def test_ambiguous_match_description_is_ukrainian(self):
         previous = [{
-            'ip': '192.168.0.10', 'hostname': 'printer-office', 'mac': '',
-            'vendor': '', 'open_ports': [80, 443], 'role': 'web-сервер'
+            'ip': '192.168.0.10', 'hostname': 'printer-office', 'mac': '02:11:22:33:44:55',
+            'vendor': '', 'open_ports': [80], 'role': 'web-сервер'
         }]
         current = [{
-            'ip': '192.168.0.10', 'hostname': 'printer-office', 'mac': '',
-            'vendor': '', 'open_ports': [80], 'role': 'web-сервер'
+            'ip': '192.168.0.45', 'hostname': 'printer-office', 'mac': '02:11:22:33:44:55',
+            'vendor': '', 'open_ports': [80, 443], 'role': 'web-сервер, альтернативний web-сервіс'
         }]
 
         events = compare_scans(previous, current)

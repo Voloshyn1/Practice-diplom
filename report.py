@@ -1,3 +1,39 @@
+ATTENTION_LEVEL_UK = {
+    "Low": "Низький",
+    "Moderate": "Помірний",
+    "Elevated": "Підвищений",
+    "High": "Високий",
+    "Critical": "Критичний",
+}
+
+
+def ukrainian_plural(number: int, one: str, few: str, many: str) -> str:
+    abs_number = abs(number)
+    last_two = abs_number % 100
+    last = abs_number % 10
+    if 11 <= last_two <= 14:
+        return many
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+
+def format_ukrainian_count(number: int, one: str, few: str, many: str) -> str:
+    return f"{number} {ukrainian_plural(number, one, few, many)}"
+
+
+def disappeared_hosts_phrase(number: int) -> str:
+    noun = ukrainian_plural(number, "хост", "хости", "хостів")
+    verb = "зник" if abs(number) % 10 == 1 and abs(number) % 100 != 11 else "зникли"
+    return f"{number} {noun} {verb}"
+
+
+def display_attention_level(level: str) -> str:
+    return ATTENTION_LEVEL_UK.get(level, level)
+
+
 def build_scan_summary(
     *,
     network: str,
@@ -33,8 +69,10 @@ def build_scan_summary(
 
     lines.append(
         "Порівняно з попереднім скануванням знайдено "
-        f"{total_changes} змін: {new_hosts} нових хостів, "
-        f"{disappeared_hosts} хостів зникли, {port_changes} змін портів."
+        f"{format_ukrainian_count(total_changes, 'зміну', 'зміни', 'змін')}: "
+        f"{format_ukrainian_count(new_hosts, 'новий хост', 'нові хости', 'нових хостів')}, "
+        f"{disappeared_hosts_phrase(disappeared_hosts)}, "
+        f"{format_ukrainian_count(port_changes, 'зміну портів', 'зміни портів', 'змін портів')}."
     )
 
     if ambiguous_identity_events:
@@ -47,7 +85,8 @@ def build_scan_summary(
             short_reason = reasons[0] if reasons else "без уточнення"
             lines.append(
                 f"{idx}. {item.get('ip', '')} — "
-                f"{item.get('attention_score', 0)} ({item.get('attention_level', 'Low')}): "
+                f"{item.get('attention_score', 0)} "
+                f"({display_attention_level(item.get('attention_level', 'Low'))}): "
                 f"{short_reason}."
             )
     else:
